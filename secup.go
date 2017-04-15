@@ -52,6 +52,7 @@ type Store struct {
 }
 
 func Open(dir string, c *config) (*Store, error) {
+	os.Mkdir(dir, 0755)
 	st, err := os.Stat(dir)
 	if err == nil && !st.IsDir() {
 		err = errors.New("store is not a directory")
