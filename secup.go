@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,36 +13,22 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
 var extOverride = map[string]string{
-	"application/octet-stream": "bin",
-	"image/gif":                "gif",
-	"image/jpeg":               "jpg",
-	"image/png":                "png",
-	"image/svg+xml":            "svg",
-	"text/html":                "html",
-	"text/plain":               "txt",
-	"video/webm":               "webm",
-	"video/x-matroska":         "mkv",
-}
-
-type config struct {
-	ExtURL  string   `json:"external_url"`
-	MaxSize uint64   `json:"max_size"`
-	Keys    []string `json:"keys"`
-}
-
-func parseConfig(p string) (*config, error) {
-	b, err := ioutil.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	c := &config{}
-	return c, json.Unmarshal(b, c)
+	"image/gif":        ".gif",
+	"image/jpeg":       ".jpg",
+	"image/png":        ".png",
+	"image/svg+xml":    ".svg",
+	"text/html":        ".html",
+	"text/plain":       ".txt",
+	"video/webm":       ".webm",
+	"video/x-matroska": ".mkv",
 }
 
 type Store struct {
@@ -51,13 +36,12 @@ type Store struct {
 	cfg  *config
 }
 
-func Open(dir string, c *config) (*Store, error) {
-	os.Mkdir(dir, 0755)
-	st, err := os.Stat(dir)
-	if err == nil && !st.IsDir() {
-		err = errors.New("store is not a directory")
+func Open(path string, c *config) (*Store, error) {
+	err := os.Mkdir(path, 0700)
+	if err != nil && !os.IsExist(err) {
+		return nil, err
 	}
-	return &Store{dir, c}, err
+	return &Store{path, c}, err
 }
 
 func (s *Store) readToTemp(r io.Reader) (string, error) {
@@ -74,7 +58,7 @@ func (s *Store) readToTemp(r io.Reader) (string, error) {
 	return tn, err
 }
 
-func (s *Store) Upload(r io.Reader, ext string) (string, error) {
+func (s *Store) Put(r io.Reader) (string, error) {
 	r = newLimitReader(r, s.cfg.MaxSize)
 	hw := sha256.New()
 	r = io.TeeReader(r, hw)
@@ -87,8 +71,35 @@ func (s *Store) Upload(r io.Reader, ext string) (string, error) {
 	enc := base64.RawURLEncoding
 	hashBytes := make([]byte, enc.EncodedLen(len(hs)))
 	enc.Encode(hashBytes, hs)
-	name := string(hashBytes) + "." + ext
-	return name, os.Rename(tn, filepath.Join(s.path, name))
+	hash := string(hashBytes)
+	return hash, os.Rename(tn, filepath.Join(s.path, hash))
+}
+
+func (s *Store) Open(name string) (*os.File, os.FileInfo, error) {
+	f, err := os.Open(filepath.Join(s.path, name))
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, st, nil
+}
+
+type config struct {
+	MaxSize uint64   `json:"max_size"`
+	Keys    []string `json:"keys"`
+}
+
+func parseConfig(p string) (*config, error) {
+	b, err := ioutil.ReadFile(p)
+	if err != nil {
+		return nil, err
+	}
+	c := &config{}
+	return c, json.Unmarshal(b, c)
 }
 
 func (s *Store) checkKey(key string) bool {
@@ -117,24 +128,33 @@ func detectContentType(r io.Reader) (string, io.Reader, error) {
 	return http.DetectContentType(preview), r, nil
 }
 
-func mimeExtension(typ string) string {
+func extensionByType(typ string) string {
 	ext, ok := extOverride[typ]
 	if !ok {
 		exts, err := mime.ExtensionsByType(typ)
 		if err == nil && exts != nil && len(exts) == 0 {
-			ext = exts[0]
+			ext = "." + exts[0]
 		}
-	}
-	if ext == "" {
-		ext = "bin"
 	}
 	return ext
 }
 
+func toHTTPError(err error) (string, int) {
+	switch {
+	case os.IsNotExist(err):
+		return "404 Not Found", http.StatusNotFound
+	case os.IsPermission(err):
+		return "403 Forbidden", http.StatusForbidden
+	case err == ErrSizeLimit:
+		return "upload too big", 413
+	}
+	log.Print(err)
+	return "500 Internal Server Error", http.StatusInternalServerError
+}
+
 func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == "GET" {
-		// placeholder, should be served by web server directly
-		http.FileServer(http.Dir(s.path)).ServeHTTP(w, req)
+		s.serveFile(w, req)
 		return
 	}
 	if req.Method != "POST" {
@@ -143,13 +163,13 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	k := req.FormValue("k")
 	if !s.checkKey(k) {
-		http.NotFound(w, req)
+		http.Error(w, http.StatusText(403), 403)
 		return
 	}
 	f, fh, err := req.FormFile("f")
 	if err != nil {
 		log.Printf("Store.ServeHTTP: FormFile: %s", err)
-		http.NotFound(w, req)
+		http.Error(w, http.StatusText(400), 400)
 		return
 	}
 	defer f.Close()
@@ -159,17 +179,55 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		ct, r, err = detectContentType(r)
 		if err != nil {
 			log.Printf("Store.ServeHTTP: detectContentType: %s", err)
-			http.NotFound(w, req)
+			http.Error(w, http.StatusText(400), 400)
 			return
 		}
 	}
-	name, err := s.Upload(r, mimeExtension(ct))
+	name, err := s.Put(r)
 	if err != nil {
-		log.Printf("Store.ServeHTTP: Upload: %s", err)
+		msg, code := toHTTPError(err)
+		http.Error(w, msg, code)
+		return
+	}
+	u := url.URL{}
+	u.Scheme = req.URL.Scheme
+	u.Host = req.URL.Host
+	u.Path = name + extensionByType(ct)
+	fmt.Fprintf(w, "%s\n", u.String())
+}
+
+func splitExt(p string) (string, string) {
+	for i, r := range p {
+		if r == '.' {
+			return p[:i], p[i:]
+		}
+	}
+	return p, ""
+}
+
+func (s *Store) serveFile(w http.ResponseWriter, req *http.Request) {
+	fn := path.Clean(req.URL.Path)
+	if strings.ContainsAny(fn, "/\\") {
 		http.NotFound(w, req)
 		return
 	}
-	fmt.Fprintf(w, "%s/%s\n", s.cfg.ExtURL, name)
+	hash, ext := splitExt(fn)
+	f, st, err := s.Open(hash)
+	if err != nil {
+		msg, code := toHTTPError(err)
+		http.Error(w, msg, code)
+		return
+	}
+	defer f.Close()
+	typ := mime.TypeByExtension(ext)
+	if typ == "" {
+		typ = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", typ)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, req, hash, st.ModTime(), f)
 }
 
 func run() error {
@@ -183,8 +241,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	http.Handle("/", s)
-	log.Fatal(http.ListenAndServe("127.0.0.1:8080", nil))
+	log.Fatal(http.ListenAndServe("127.0.0.1:8080", s))
 	return nil
 }
 
