@@ -12,6 +12,7 @@ import (
 	"io/ioutil"
 	"log"
 	"mime"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path"
@@ -74,7 +75,7 @@ func (s *Store) Put(r io.Reader) (string, error) {
 	return hash, os.Rename(tn, filepath.Join(s.path, hash))
 }
 
-func (s *Store) Open(name string) (*os.File, os.FileInfo, error) {
+func (s *Store) Get(name string) (*os.File, os.FileInfo, error) {
 	f, err := os.Open(filepath.Join(s.path, name))
 	if err != nil {
 		return nil, nil, err
@@ -113,7 +114,24 @@ func (s *Store) checkKey(key string) bool {
 	return false
 }
 
-func detectContentType(r io.Reader) (string, io.Reader, error) {
+func splitExt(p string) (string, string) {
+	for i, r := range p {
+		if r == '.' {
+			return p[:i], p[i:]
+		}
+	}
+	return p, ""
+}
+
+func detectContentType(r io.Reader, fh *multipart.FileHeader) (string, io.Reader, error) {
+	ct := fh.Header.Get("Content-Type")
+	if ct != "" && ct != "application/octet-stream" && strings.Contains(ct, "/") {
+		return ct, r, nil
+	}
+	_, ext := splitExt(fh.Filename)
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct, r, nil
+	}
 	preview := make([]byte, 512)
 	n, err := io.ReadFull(r, preview)
 	switch {
@@ -129,14 +147,29 @@ func detectContentType(r io.Reader) (string, io.Reader, error) {
 }
 
 func extensionByType(typ string) string {
-	ext, ok := extOverride[typ]
-	if !ok {
-		exts, err := mime.ExtensionsByType(typ)
-		if err == nil && exts != nil && len(exts) == 0 {
-			ext = "." + exts[0]
-		}
+	typ, _, err := mime.ParseMediaType(typ)
+	if err != nil {
+		return ""
 	}
-	return ext
+	if ext, ok := extOverride[typ]; ok {
+		return ext
+	}
+	exts, err := mime.ExtensionsByType(typ)
+	if err == nil && exts != nil && len(exts) != 0 {
+		return exts[0]
+	}
+	return ""
+}
+
+func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	switch req.Method {
+	case "GET":
+		s.serveFile(w, req)
+	case "POST":
+		s.uploadFile(w, req)
+	default:
+		http.NotFound(w, req)
+	}
 }
 
 func toHTTPError(err error) (string, int) {
@@ -154,15 +187,7 @@ func toHTTPError(err error) (string, int) {
 	return http.StatusText(code), code
 }
 
-func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.Method == "GET" {
-		s.serveFile(w, req)
-		return
-	}
-	if req.Method != "POST" {
-		http.NotFound(w, req)
-		return
-	}
+func (s *Store) uploadFile(w http.ResponseWriter, req *http.Request) {
 	k := req.FormValue("k")
 	if !s.checkKey(k) {
 		http.Error(w, http.StatusText(403), 403)
@@ -175,15 +200,11 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer f.Close()
-	var r io.Reader = f
-	ct := fh.Header.Get("Content-Type")
-	if ct == "" || ct == "application/octet-stream" || !strings.Contains(ct, "/") {
-		ct, r, err = detectContentType(r)
-		if err != nil {
-			log.Printf("Store.ServeHTTP: detectContentType: %s", err)
-			http.Error(w, http.StatusText(400), 400)
-			return
-		}
+	ct, r, err := detectContentType(f, fh)
+	if err != nil {
+		log.Printf("Store.ServeHTTP: detectContentType: %s", err)
+		http.Error(w, http.StatusText(400), 400)
+		return
 	}
 	name, err := s.Put(r)
 	if err != nil {
@@ -194,15 +215,6 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "%s/%s%s\n", s.cfg.ExtURL, name, extensionByType(ct))
 }
 
-func splitExt(p string) (string, string) {
-	for i, r := range p {
-		if r == '.' {
-			return p[:i], p[i:]
-		}
-	}
-	return p, ""
-}
-
 func (s *Store) serveFile(w http.ResponseWriter, req *http.Request) {
 	fn := strings.TrimLeft(path.Clean(req.URL.Path), "/")
 	if strings.ContainsAny(fn, "/\\") {
@@ -210,7 +222,7 @@ func (s *Store) serveFile(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	hash, ext := splitExt(fn)
-	f, st, err := s.Open(hash)
+	f, st, err := s.Get(hash)
 	if err != nil {
 		msg, code := toHTTPError(err)
 		http.Error(w, msg, code)
