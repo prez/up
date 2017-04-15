@@ -31,20 +31,20 @@ var extOverride = map[string]string{
 	"video/x-matroska": ".mkv",
 }
 
-type Store struct {
+type store struct {
 	path string
 	cfg  *config
 }
 
-func Open(path string, c *config) (*Store, error) {
+func openStore(path string, c *config) (*store, error) {
 	err := os.Mkdir(path, 0700)
 	if os.IsExist(err) {
 		err = nil
 	}
-	return &Store{path, c}, err
+	return &store{path, c}, err
 }
 
-func (s *Store) readToTemp(r io.Reader) (string, error) {
+func (s *store) readToTemp(r io.Reader) (string, error) {
 	tf, err := ioutil.TempFile(s.path, "tmp")
 	if err != nil {
 		return "", err
@@ -58,7 +58,7 @@ func (s *Store) readToTemp(r io.Reader) (string, error) {
 	return tn, err
 }
 
-func (s *Store) Put(r io.Reader) (string, error) {
+func (s *store) put(r io.Reader) (string, error) {
 	r = newLimitReader(r, s.cfg.MaxSize)
 	hw := sha256.New()
 	r = io.TeeReader(r, hw)
@@ -75,7 +75,7 @@ func (s *Store) Put(r io.Reader) (string, error) {
 	return hash, os.Rename(tn, filepath.Join(s.path, hash))
 }
 
-func (s *Store) Get(name string) (*os.File, os.FileInfo, error) {
+func (s *store) get(name string) (*os.File, os.FileInfo, error) {
 	f, err := os.Open(filepath.Join(s.path, name))
 	if err != nil {
 		return nil, nil, err
@@ -103,7 +103,7 @@ func parseConfig(p string) (*config, error) {
 	return c, json.Unmarshal(b, c)
 }
 
-func (s *Store) checkKey(key string) bool {
+func (s *store) checkKey(key string) bool {
 	k := []byte(key)
 	for _, key := range s.cfg.Keys {
 		b := []byte(key)
@@ -161,7 +161,7 @@ func extensionByType(typ string) string {
 	return ""
 }
 
-func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+func (s *store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
 	case "GET":
 		s.serveFile(w, req)
@@ -187,7 +187,7 @@ func toHTTPError(err error) (string, int) {
 	return http.StatusText(code), code
 }
 
-func (s *Store) uploadFile(w http.ResponseWriter, req *http.Request) {
+func (s *store) uploadFile(w http.ResponseWriter, req *http.Request) {
 	k := req.FormValue("k")
 	if !s.checkKey(k) {
 		http.Error(w, http.StatusText(403), 403)
@@ -195,18 +195,18 @@ func (s *Store) uploadFile(w http.ResponseWriter, req *http.Request) {
 	}
 	f, fh, err := req.FormFile("f")
 	if err != nil {
-		log.Printf("Store.ServeHTTP: FormFile: %s", err)
+		log.Printf("store.ServeHTTP: FormFile: %s", err)
 		http.Error(w, http.StatusText(400), 400)
 		return
 	}
 	defer f.Close()
 	ct, r, err := detectContentType(f, fh)
 	if err != nil {
-		log.Printf("Store.ServeHTTP: detectContentType: %s", err)
+		log.Printf("store.ServeHTTP: detectContentType: %s", err)
 		http.Error(w, http.StatusText(400), 400)
 		return
 	}
-	name, err := s.Put(r)
+	name, err := s.put(r)
 	if err != nil {
 		msg, code := toHTTPError(err)
 		http.Error(w, msg, code)
@@ -215,14 +215,14 @@ func (s *Store) uploadFile(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "%s/%s%s\n", s.cfg.ExtURL, name, extensionByType(ct))
 }
 
-func (s *Store) serveFile(w http.ResponseWriter, req *http.Request) {
+func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
 	fn := strings.TrimLeft(path.Clean(req.URL.Path), "/")
 	if strings.ContainsAny(fn, "/\\") {
 		http.NotFound(w, req)
 		return
 	}
 	hash, ext := splitExt(fn)
-	f, st, err := s.Get(hash)
+	f, st, err := s.get(hash)
 	if err != nil {
 		msg, code := toHTTPError(err)
 		http.Error(w, msg, code)
@@ -246,7 +246,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	s, err := Open("store", c)
+	s, err := openStore("store", c)
 	if err != nil {
 		return err
 	}
