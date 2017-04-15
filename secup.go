@@ -117,9 +117,23 @@ func detectContentType(r io.Reader) (string, io.Reader, error) {
 	return http.DetectContentType(preview), r, nil
 }
 
+func mimeExtension(typ string) string {
+	ext, ok := extOverride[typ]
+	if !ok {
+		exts, err := mime.ExtensionsByType(typ)
+		if err == nil && exts != nil && len(exts) == 0 {
+			ext = exts[0]
+		}
+	}
+	if ext == "" {
+		ext = "bin"
+	}
+	return ext
+}
+
 func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if req.Method == "GET" {
-		// placeholder, should be served by nginx directly
+		// placeholder, should be served by web server directly
 		http.FileServer(http.Dir(s.path)).ServeHTTP(w, req)
 		return
 	}
@@ -149,17 +163,7 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
-	ext, ok := extOverride[ct]
-	if !ok {
-		exts, err := mime.ExtensionsByType(ct)
-		if err == nil && exts != nil && len(exts) == 0 {
-			ext = exts[0]
-		}
-	}
-	if ext == "" {
-		ext = "bin"
-	}
-	name, err := s.Upload(r, ext)
+	name, err := s.Upload(r, mimeExtension(ct))
 	if err != nil {
 		log.Printf("Store.ServeHTTP: Upload: %s", err)
 		http.NotFound(w, req)
