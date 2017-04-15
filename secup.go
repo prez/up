@@ -13,7 +13,6 @@ import (
 	"log"
 	"mime"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -38,8 +37,8 @@ type Store struct {
 
 func Open(path string, c *config) (*Store, error) {
 	err := os.Mkdir(path, 0700)
-	if err != nil && !os.IsExist(err) {
-		return nil, err
+	if os.IsExist(err) {
+		err = nil
 	}
 	return &Store{path, c}, err
 }
@@ -89,6 +88,7 @@ func (s *Store) Open(name string) (*os.File, os.FileInfo, error) {
 }
 
 type config struct {
+	ExtURL  string   `json:"external_url"`
 	MaxSize uint64   `json:"max_size"`
 	Keys    []string `json:"keys"`
 }
@@ -140,16 +140,18 @@ func extensionByType(typ string) string {
 }
 
 func toHTTPError(err error) (string, int) {
+	code := 500
 	switch {
 	case os.IsNotExist(err):
-		return "404 Not Found", http.StatusNotFound
+		code = 404
 	case os.IsPermission(err):
-		return "403 Forbidden", http.StatusForbidden
+		code = 403
 	case err == ErrSizeLimit:
-		return "upload too big", 413
+		code = 413
+	default:
+		log.Print(err)
 	}
-	log.Print(err)
-	return "500 Internal Server Error", http.StatusInternalServerError
+	return http.StatusText(code), code
 }
 
 func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -189,11 +191,7 @@ func (s *Store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, msg, code)
 		return
 	}
-	u := url.URL{}
-	u.Scheme = req.URL.Scheme
-	u.Host = req.URL.Host
-	u.Path = name + extensionByType(ct)
-	fmt.Fprintf(w, "%s\n", u.String())
+	fmt.Fprintf(w, "%s/%s%s\n", s.cfg.ExtURL, name, extensionByType(ct))
 }
 
 func splitExt(p string) (string, string) {
@@ -206,7 +204,7 @@ func splitExt(p string) (string, string) {
 }
 
 func (s *Store) serveFile(w http.ResponseWriter, req *http.Request) {
-	fn := path.Clean(req.URL.Path)
+	fn := strings.TrimLeft(path.Clean(req.URL.Path), "/")
 	if strings.ContainsAny(fn, "/\\") {
 		http.NotFound(w, req)
 		return
@@ -226,7 +224,6 @@ func (s *Store) serveFile(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", typ)
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, req, hash, st.ModTime(), f)
 }
 
