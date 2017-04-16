@@ -18,6 +18,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 var extOverride = map[string]string{
@@ -61,6 +62,7 @@ func (s *store) readToTemp(r io.Reader) (string, error) {
 func (s *store) put(r io.Reader) (string, error) {
 	r = newLimitReader(r, s.cfg.MaxSize)
 	hw := sha256.New()
+	hw.Write(s.cfg.Seed)
 	r = io.TeeReader(r, hw)
 	tn, err := s.readToTemp(r)
 	if err != nil {
@@ -88,10 +90,16 @@ func (s *store) get(name string) (*os.File, os.FileInfo, error) {
 	return f, st, nil
 }
 
+func (s *store) del(name string) error {
+	return nil
+}
+
 type config struct {
 	ExtURL  string   `json:"external_url"`
 	MaxSize uint64   `json:"max_size"`
+	Seed    []byte   `json:"seed"`
 	Keys    []string `json:"keys"`
+	XAccel  bool     `json:"x_accel_redirect"` // use X-Accel-Redirect to serve files
 }
 
 func parseConfig(p string) (*config, error) {
@@ -167,6 +175,8 @@ func (s *store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		s.serveFile(w, req)
 	case "POST":
 		s.uploadFile(w, req)
+	//case "DELETE":
+	//	s.deleteFile(w, req)
 	default:
 		http.NotFound(w, req)
 	}
@@ -215,13 +225,45 @@ func (s *store) uploadFile(w http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(w, "%s/%s%s\n", s.cfg.ExtURL, name, extensionByType(ct))
 }
 
-func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
-	fn := strings.TrimLeft(path.Clean(req.URL.Path), "/")
-	if strings.ContainsAny(fn, "/\\") {
-		http.NotFound(w, req)
+func cleanPath(p string) (string, string) {
+	p = strings.TrimLeft(path.Clean(p), "/")
+	if strings.ContainsAny(p, "/\\") {
+		return "", ""
+	}
+	return splitExt(p)
+}
+
+func (s *store) deleteFile(w http.ResponseWriter, req *http.Request) {
+	k := req.FormValue("k")
+	if !s.checkKey(k) {
+		http.Error(w, http.StatusText(403), 403)
 		return
 	}
-	hash, ext := splitExt(fn)
+	hash, _ := cleanPath(req.URL.Path)
+	if hash == "" {
+		http.Error(w, http.StatusText(400), 400)
+		return
+	}
+	err := os.Remove(filepath.Join(s.path, hash))
+	if err != nil {
+		http.Error(w, http.StatusText(400), 400)
+		log.Printf("s.deleteFile: %s", err)
+		return
+	}
+}
+
+func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
+	hash, ext := cleanPath(req.URL.Path)
+	if hash == "" {
+		http.Error(w, http.StatusText(400), 400)
+		return
+	}
+	typ := mime.TypeByExtension(ext)
+	if typ == "" {
+		typ = "application/octet-stream"
+	}
+	// TODO: implement X-Accel-Redirect
+	//if s.cfg.XAccel { }
 	f, st, err := s.get(hash)
 	if err != nil {
 		msg, code := toHTTPError(err)
@@ -229,10 +271,6 @@ func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer f.Close()
-	typ := mime.TypeByExtension(ext)
-	if typ == "" {
-		typ = "application/octet-stream"
-	}
 	w.Header().Set("Content-Type", typ)
 	w.Header().Set("Content-Security-Policy", "default-src 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -240,17 +278,28 @@ func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
 }
 
 func run() error {
-	configPath := flag.String("config", "config.json", "configuration path")
+	var (
+		addr       = flag.String("addr", "127.0.0.1:9111", "address")
+		configPath = flag.String("config", "config.json", "configuration path")
+		storePath  = flag.String("store", ".", "store path")
+	)
 	flag.Parse()
 	c, err := parseConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	s, err := openStore("store", c)
+	s, err := openStore(*storePath, c)
 	if err != nil {
 		return err
 	}
-	log.Fatal(http.ListenAndServe("127.0.0.1:8080", s))
+	srv := &http.Server{
+		Addr:         *addr,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		Handler:      s,
+	}
+	log.Fatal(srv.ListenAndServe())
 	return nil
 }
 
