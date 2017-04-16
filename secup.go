@@ -281,7 +281,7 @@ func run() error {
 	var (
 		addr       = flag.String("addr", "127.0.0.1:9111", "address")
 		configPath = flag.String("config", "config.json", "configuration path")
-		storePath  = flag.String("store", ".", "store path")
+		storePath  = flag.String("store", "./store", "store path")
 	)
 	flag.Parse()
 	c, err := parseConfig(*configPath)
