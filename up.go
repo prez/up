@@ -254,7 +254,7 @@ func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
 	http.ServeContent(w, req, hash, st.ModTime(), f)
 }
 
-func run() error {
+func main() {
 	var (
 		addr       = flag.String("addr", "127.0.0.1:9111", "address")
 		configPath = flag.String("config", "config.json", "configuration path")
@@ -263,11 +263,11 @@ func run() error {
 	flag.Parse()
 	c, err := parseConfig(*configPath)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
 	s, err := openStore(*storePath, c)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
 	srv := &http.Server{
 		Addr:         *addr,
@@ -277,12 +277,4 @@ func run() error {
 		Handler:      s,
 	}
 	log.Fatal(srv.ListenAndServe())
-	return nil
-}
-
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "secup: %s\n", err)
-		os.Exit(1)
-	}
 }
