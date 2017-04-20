@@ -96,7 +96,7 @@ func (s *store) del(name string) error {
 
 type config struct {
 	ExtURL  string   `json:"external_url"`
-	MaxSize uint64   `json:"max_size"`
+	MaxSize int64    `json:"max_size"`
 	Seed    []byte   `json:"seed"`
 	Keys    []string `json:"keys"`
 	XAccel  bool     `json:"x_accel_redirect"` // use X-Accel-Redirect to serve files
