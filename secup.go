@@ -90,16 +90,12 @@ func (s *store) get(name string) (*os.File, os.FileInfo, error) {
 	return f, st, nil
 }
 
-func (s *store) del(name string) error {
-	return nil
-}
-
 type config struct {
 	ExtURL  string   `json:"external_url"`
 	MaxSize int64    `json:"max_size"`
 	Seed    []byte   `json:"seed"`
 	Keys    []string `json:"keys"`
-	XAccel  bool     `json:"x_accel_redirect"` // use X-Accel-Redirect to serve files
+	//XAccel  bool `json:"x_accel_redirect"` // use X-Accel-Redirect to serve files
 }
 
 func parseConfig(p string) (*config, error) {
@@ -112,6 +108,9 @@ func parseConfig(p string) (*config, error) {
 }
 
 func (s *store) checkKey(key string) bool {
+	if len(key) > 100 || len(key) < 10 {
+		return false
+	}
 	k := []byte(key)
 	for _, key := range s.cfg.Keys {
 		b := []byte(key)
@@ -175,8 +174,6 @@ func (s *store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		s.serveFile(w, req)
 	case "POST":
 		s.uploadFile(w, req)
-	//case "DELETE":
-	//	s.deleteFile(w, req)
 	default:
 		http.NotFound(w, req)
 	}
@@ -233,25 +230,6 @@ func cleanPath(p string) (string, string) {
 	return splitExt(p)
 }
 
-func (s *store) deleteFile(w http.ResponseWriter, req *http.Request) {
-	k := req.FormValue("k")
-	if !s.checkKey(k) {
-		http.Error(w, http.StatusText(403), 403)
-		return
-	}
-	hash, _ := cleanPath(req.URL.Path)
-	if hash == "" {
-		http.Error(w, http.StatusText(400), 400)
-		return
-	}
-	err := os.Remove(filepath.Join(s.path, hash))
-	if err != nil {
-		http.Error(w, http.StatusText(400), 400)
-		log.Printf("s.deleteFile: %s", err)
-		return
-	}
-}
-
 func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
 	hash, ext := cleanPath(req.URL.Path)
 	if hash == "" {
@@ -272,7 +250,6 @@ func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
 	}
 	defer f.Close()
 	w.Header().Set("Content-Type", typ)
-	w.Header().Set("Content-Security-Policy", "default-src 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
 	http.ServeContent(w, req, hash, st.ModTime(), f)
 }
@@ -281,7 +258,7 @@ func run() error {
 	var (
 		addr       = flag.String("addr", "127.0.0.1:9111", "address")
 		configPath = flag.String("config", "config.json", "configuration path")
-		storePath  = flag.String("store", "./store", "store path")
+		storePath  = flag.String("store", "store", "store path")
 	)
 	flag.Parse()
 	c, err := parseConfig(*configPath)
