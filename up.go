@@ -2,10 +2,9 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -13,89 +12,39 @@ import (
 	"log"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
 var extOverride = map[string]string{
-	"image/gif":        ".gif",
-	"image/jpeg":       ".jpg",
-	"image/png":        ".png",
-	"image/svg+xml":    ".svg",
-	"text/html":        ".html",
-	"text/plain":       ".txt",
-	"video/webm":       ".webm",
-	"video/x-matroska": ".mkv",
+	"image/gif":                ".gif",
+	"image/jpeg":               ".jpg",
+	"image/png":                ".png",
+	"image/svg+xml":            ".svg",
+	"text/html":                ".html",
+	"text/plain":               ".txt",
+	"video/webm":               ".webm",
+	"video/x-matroska":         ".mkv",
+	"application/octet-stream": "",
 }
 
-type store struct {
-	path string
-	cfg  *config
-}
-
-func openStore(path string, c *config) (*store, error) {
-	err := os.Mkdir(path, 0700)
-	if os.IsExist(err) {
-		err = nil
-	}
-	return &store{path, c}, err
-}
-
-func (s *store) readToTemp(r io.Reader) (string, error) {
-	tf, err := ioutil.TempFile(s.path, "tmp")
-	if err != nil {
-		return "", err
-	}
-	tn := tf.Name()
-	_, err = io.Copy(tf, r)
-	tf.Close()
-	if err != nil {
-		os.Remove(tn)
-	}
-	return tn, err
-}
-
-func (s *store) put(r io.Reader) (string, error) {
-	r = newLimitReader(r, s.cfg.MaxSize)
-	hw := sha256.New()
-	hw.Write(s.cfg.Seed)
-	r = io.TeeReader(r, hw)
-	tn, err := s.readToTemp(r)
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tn)
-	hs := hw.Sum(nil)
-	enc := base64.RawURLEncoding
-	hashBytes := make([]byte, enc.EncodedLen(len(hs)))
-	enc.Encode(hashBytes, hs)
-	hash := string(hashBytes)
-	return hash, os.Rename(tn, filepath.Join(s.path, hash))
-}
-
-func (s *store) get(name string) (*os.File, os.FileInfo, error) {
-	f, err := os.Open(filepath.Join(s.path, name))
-	if err != nil {
-		return nil, nil, err
-	}
-	st, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, nil, err
-	}
-	return f, st, nil
-}
+var (
+	errUnauthorized = errors.New("unauthorized request")
+	errBadRequest   = errors.New("bad request")
+	errNotExist     = errors.New("entry does not exist")
+	errSizeLimit    = errors.New("size limit exceeded")
+)
 
 type config struct {
-	ExtURL  string   `json:"external_url"`
-	MaxSize int64    `json:"max_size"`
-	Seed    []byte   `json:"seed"`
-	Keys    []string `json:"keys"`
-	//XAccel  bool `json:"x_accel_redirect"` // use X-Accel-Redirect to serve files
+	ExternalURL string            `json:"external_url"`
+	ExtTypes    map[string]string `json:"ext_types"`
+	MaxSize     int64             `json:"max_size"`
+	Seed        []byte            `json:"seed"`
+	Keys        []string          `json:"keys"`
 }
 
 func parseConfig(p string) (*config, error) {
@@ -107,12 +56,59 @@ func parseConfig(p string) (*config, error) {
 	return c, json.Unmarshal(b, c)
 }
 
-func (s *store) checkKey(key string) bool {
-	if len(key) > 100 || len(key) < 10 {
-		return false
+type fileHost struct {
+	store  *store
+	config *config
+	logger *log.Logger
+}
+
+func toHTTPError(err error) (int, string) {
+	switch {
+	case os.IsNotExist(err) || err == errNotExist:
+		return 404, "Not Found"
+	case os.IsPermission(err) || err == errUnauthorized:
+		return 403, "Forbidden"
+	case err == errBadRequest:
+		return 400, "Bad Request"
+	case err == errSizeLimit:
+		return 413, "Payload Too Large"
+	}
+	return 500, "Internal Server Error"
+}
+
+// XXX: doesn't support X-Forwarded-For
+func remoteAddr(req *http.Request) string {
+	h := req.Header.Get("X-Real-IP")
+	if h == "" {
+		h, _, _ = net.SplitHostPort(req.RemoteAddr)
+	}
+	return h
+}
+
+func (s *fileHost) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	var err error
+	switch req.Method {
+	case "POST":
+		err = s.uploadFile(w, req)
+	case "GET":
+		err = s.serveFile(w, req)
+	default:
+		http.Error(w, "Not Found", 404)
+		return
+	}
+	if err != nil {
+		s.logger.Printf("%s: %s", remoteAddr(req), err)
+		code, text := toHTTPError(err)
+		http.Error(w, text, code)
+	}
+}
+
+func (s *fileHost) checkKey(key string) bool {
+	if len(key) < 20 || len(key) > 100 {
+		return false // sanity check
 	}
 	k := []byte(key)
-	for _, key := range s.cfg.Keys {
+	for _, key := range s.config.Keys {
 		b := []byte(key)
 		if len(k) == len(b) && subtle.ConstantTimeCompare(k, b) == 1 {
 			return true
@@ -121,23 +117,35 @@ func (s *store) checkKey(key string) bool {
 	return false
 }
 
+// clean up file paths from content-disposition headers
+func fixMultipartPath(s string) string {
+	if i := strings.LastIndexAny(s, "\\//"); i != -1 {
+		s = s[i+1:]
+	}
+	if s == "-" || len(s) > 78 {
+		return ""
+	}
+	return s
+}
+
+// split file name on extension
 func splitExt(p string) (string, string) {
-	for i, r := range p {
-		if r == '.' {
-			return p[:i], p[i:]
-		}
+	if i := strings.IndexByte(p, '.'); i != -1 {
+		return p[:i], p[i:]
 	}
 	return p, ""
 }
 
+func justType(typ string) string { typ, _, _ = mime.ParseMediaType(typ); return typ }
+
 func detectContentType(r io.Reader, fh *multipart.FileHeader) (string, io.Reader, error) {
-	ct := fh.Header.Get("Content-Type")
-	if ct != "" && ct != "application/octet-stream" && strings.Contains(ct, "/") {
-		return ct, r, nil
+	typ := justType(fh.Header.Get("Content-Type"))
+	if typ != "application/octet-stream" && strings.Contains(typ, "/") {
+		return typ, r, nil
 	}
 	_, ext := splitExt(fh.Filename)
-	if ct := mime.TypeByExtension(ext); ct != "" {
-		return ct, r, nil
+	if typ := mime.TypeByExtension(ext); typ != "" {
+		return typ, r, nil
 	}
 	preview := make([]byte, 512)
 	n, err := io.ReadFull(r, preview)
@@ -150,14 +158,10 @@ func detectContentType(r io.Reader, fh *multipart.FileHeader) (string, io.Reader
 	default:
 		r = io.MultiReader(bytes.NewReader(preview), r)
 	}
-	return http.DetectContentType(preview), r, nil
+	return justType(http.DetectContentType(preview)), r, nil
 }
 
 func extensionByType(typ string) string {
-	typ, _, err := mime.ParseMediaType(typ)
-	if err != nil {
-		return ""
-	}
 	if ext, ok := extOverride[typ]; ok {
 		return ext
 	}
@@ -168,60 +172,34 @@ func extensionByType(typ string) string {
 	return ""
 }
 
-func (s *store) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	switch req.Method {
-	case "GET":
-		s.serveFile(w, req)
-	case "POST":
-		s.uploadFile(w, req)
-	default:
-		http.NotFound(w, req)
+func (s *fileHost) uploadFile(w http.ResponseWriter, req *http.Request) error {
+	if req.ContentLength > s.config.MaxSize {
+		return errSizeLimit // attempt to return a nice error message
 	}
-}
-
-func toHTTPError(err error) (string, int) {
-	code := 500
-	switch {
-	case os.IsNotExist(err):
-		code = 404
-	case os.IsPermission(err):
-		code = 403
-	case err == ErrSizeLimit:
-		code = 413
-	default:
-		log.Print(err)
-	}
-	return http.StatusText(code), code
-}
-
-func (s *store) uploadFile(w http.ResponseWriter, req *http.Request) {
+	req.Body = http.MaxBytesReader(w, req.Body, s.config.MaxSize)
 	k := req.FormValue("k")
 	if !s.checkKey(k) {
-		http.Error(w, http.StatusText(403), 403)
-		return
+		return errUnauthorized
 	}
 	f, fh, err := req.FormFile("f")
 	if err != nil {
-		log.Printf("store.ServeHTTP: FormFile: %s", err)
-		http.Error(w, http.StatusText(400), 400)
-		return
+		return err
 	}
 	defer f.Close()
-	ct, r, err := detectContentType(f, fh)
+	typ, r, err := detectContentType(f, fh)
 	if err != nil {
-		log.Printf("store.ServeHTTP: detectContentType: %s", err)
-		http.Error(w, http.StatusText(400), 400)
-		return
+		return err
 	}
-	name, err := s.put(r)
+	fi := fileInfo{Name: fixMultipartPath(fh.Filename), From: remoteAddr(req)}
+	name, err := s.store.put(r, &fi)
 	if err != nil {
-		msg, code := toHTTPError(err)
-		http.Error(w, msg, code)
-		return
+		return err
 	}
-	fmt.Fprintf(w, "%s/%s%s\n", s.cfg.ExtURL, name, extensionByType(ct))
+	_, err = fmt.Fprintf(w, "%s/%s%s\n", s.config.ExternalURL, name, extensionByType(typ))
+	return err
 }
 
+// validate and splits a path like <hash>.ext
 func cleanPath(p string) (string, string) {
 	p = strings.TrimLeft(path.Clean(p), "/")
 	if strings.ContainsAny(p, "/\\") {
@@ -230,28 +208,32 @@ func cleanPath(p string) (string, string) {
 	return splitExt(p)
 }
 
-func (s *store) serveFile(w http.ResponseWriter, req *http.Request) {
+// escape file name for content-disposition header
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+
+func (s *fileHost) serveFile(w http.ResponseWriter, req *http.Request) error {
 	hash, ext := cleanPath(req.URL.Path)
 	if hash == "" {
-		http.Error(w, http.StatusText(400), 400)
-		return
+		return errBadRequest
 	}
+	f, err := s.store.get(hash)
+	if err != nil {
+		return err
+	}
+	defer f.r.Close()
 	typ := mime.TypeByExtension(ext)
 	if typ == "" {
 		typ = "application/octet-stream"
 	}
-	// TODO: implement X-Accel-Redirect
-	//if s.cfg.XAccel { }
-	f, st, err := s.get(hash)
-	if err != nil {
-		msg, code := toHTTPError(err)
-		http.Error(w, msg, code)
-		return
-	}
-	defer f.Close()
 	w.Header().Set("Content-Type", typ)
 	w.Header().Set("X-Frame-Options", "DENY")
-	http.ServeContent(w, req, hash, st.ModTime(), f)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if n := f.info.Name; n != "" {
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(n)))
+	}
+	http.ServeContent(w, req, hash, f.mtime, f.r)
+	return nil
 }
 
 func main() {
@@ -260,21 +242,22 @@ func main() {
 		configPath = flag.String("config", "config.json", "configuration path")
 		storePath  = flag.String("store", "store", "store path")
 	)
+	l := log.New(os.Stderr, "", log.LstdFlags)
 	flag.Parse()
 	c, err := parseConfig(*configPath)
 	if err != nil {
-		log.Fatal(err)
+		l.Fatal(err)
 	}
-	s, err := openStore(*storePath, c)
+	s, err := openStore(*storePath, c.Seed)
 	if err != nil {
-		log.Fatal(err)
+		l.Fatal(err)
 	}
 	srv := &http.Server{
 		Addr:         *addr,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		Handler:      s,
+		Handler:      &fileHost{s, c, l},
 	}
-	log.Fatal(srv.ListenAndServe())
+	l.Fatal(srv.ListenAndServe())
 }
