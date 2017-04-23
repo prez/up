@@ -136,11 +136,10 @@ func splitExt(p string) (string, string) {
 	return p, ""
 }
 
-func justType(typ string) string { typ, _, _ = mime.ParseMediaType(typ); return typ }
-
 func detectContentType(r io.Reader, fh *multipart.FileHeader) (string, io.Reader, error) {
-	typ := justType(fh.Header.Get("Content-Type"))
-	if typ != "application/octet-stream" && strings.Contains(typ, "/") {
+	typ := fh.Header.Get("Content-Type")
+	ty, _, err := mime.ParseMediaType(typ)
+	if err == nil && ty != "application/octet-stream" {
 		return typ, r, nil
 	}
 	_, ext := splitExt(fh.Filename)
@@ -158,10 +157,11 @@ func detectContentType(r io.Reader, fh *multipart.FileHeader) (string, io.Reader
 	default:
 		r = io.MultiReader(bytes.NewReader(preview), r)
 	}
-	return justType(http.DetectContentType(preview)), r, nil
+	return http.DetectContentType(preview), r, nil
 }
 
 func extensionByType(typ string) string {
+	typ, _, _ = mime.ParseMediaType(typ)
 	if ext, ok := extOverride[typ]; ok {
 		return ext
 	}
@@ -195,7 +195,8 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, req *http.Request) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w, "%s/%s%s\n", s.config.ExternalURL, name, extensionByType(typ))
+	_, err = fmt.Fprintf(w, "%s/%s%s\n",
+		s.config.ExternalURL, name, extensionByType(typ))
 	return err
 }
 
