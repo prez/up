@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -11,13 +13,15 @@ import (
 	"io/ioutil"
 	"log"
 	"mime"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/boltdb/bolt"
 )
 
 var extOverride = map[string]string{
@@ -39,12 +43,17 @@ var (
 	errSizeLimit    = errors.New("size limit exceeded")
 )
 
+var filesBucket = []byte("files")
+
 type config struct {
 	ExternalURL string            `json:"external_url"`
 	ExtTypes    map[string]string `json:"ext_types"`
 	MaxSize     int64             `json:"max_size"`
 	Seed        []byte            `json:"seed"`
 	Keys        []string          `json:"keys"`
+
+	XAccel     bool   `json:"x_accel_enable"`
+	XAccelPath string `json:"x_accel_path"`
 }
 
 func parseConfig(p string) (*config, error) {
@@ -57,9 +66,95 @@ func parseConfig(p string) (*config, error) {
 }
 
 type fileHost struct {
-	store  *store
+	db     *bolt.DB
+	path   string
 	config *config
 	logger *log.Logger
+}
+
+func newFileHost(p string, c *config, l *log.Logger) (*fileHost, error) {
+	err := os.MkdirAll(filepath.Join(p, "public"), 0700)
+	if err != nil {
+		return nil, err
+	}
+	db, err := bolt.Open(filepath.Join(p, "db"), 0600, &bolt.Options{Timeout: time.Second})
+	if err != nil {
+		return nil, err
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		_, err := tx.CreateBucketIfNotExists(filesBucket)
+		return err
+	})
+	return &fileHost{db, p, c, l}, err
+}
+
+func (s *fileHost) readToTemp(r io.Reader) (string, error) {
+	tf, err := ioutil.TempFile(s.path, "up-")
+	if err != nil {
+		return "", err
+	}
+	tn := tf.Name()
+	_, err = io.Copy(tf, r)
+	tf.Close()
+	if err != nil {
+		os.Remove(tn)
+	}
+	return tn, err
+}
+
+type fileInfo struct {
+	Name string `json:"name,omitempty"`
+	From string `json:"ip,omitempty"`
+}
+
+func (s *fileHost) put(r io.Reader, fi *fileInfo) (string, error) {
+	hw := sha256.New()
+	hw.Write(s.config.Seed)
+	r = io.TeeReader(r, hw)
+	tn, err := s.readToTemp(r)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tn)
+	hs := hw.Sum(nil)
+	enc := base64.RawURLEncoding
+	hash := make([]byte, enc.EncodedLen(len(hs)))
+	enc.Encode(hash, hs)
+	fib, err := json.Marshal(fi)
+	if err != nil {
+		return "", err
+	}
+	exists := false
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(filesBucket)
+		if b.Get(hash) != nil {
+			exists = true
+			return nil
+		}
+		return b.Put(hash, fib)
+	})
+	if exists || err != nil {
+		return string(hash), err
+	}
+	err = os.Rename(tn, s.pathTo(string(hash)))
+	if err != nil {
+		return "", err
+	}
+	return string(hash), os.Chmod(s.pathTo(string(hash)), 0644)
+}
+
+func (s *fileHost) pathTo(hash string) string { return filepath.Join(s.path, "public", hash) }
+
+func (s *fileHost) get(hash string) (*fileInfo, error) {
+	fi := &fileInfo{}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(filesBucket).Get([]byte(hash))
+		if b == nil {
+			return nil
+		}
+		return json.Unmarshal(b, fi)
+	})
+	return fi, err
 }
 
 func toHTTPError(err error) (int, string) {
@@ -136,13 +231,12 @@ func splitExt(p string) (string, string) {
 	return p, ""
 }
 
-func detectContentType(r io.Reader, fh *multipart.FileHeader) (string, io.Reader, error) {
-	typ := fh.Header.Get("Content-Type")
+func detectContentType(r io.Reader, name string, typ string) (string, io.Reader, error) {
 	ty, _, err := mime.ParseMediaType(typ)
 	if err == nil && ty != "application/octet-stream" {
 		return typ, r, nil
 	}
-	_, ext := splitExt(fh.Filename)
+	_, ext := splitExt(name)
 	if typ := mime.TypeByExtension(ext); typ != "" {
 		return typ, r, nil
 	}
@@ -186,12 +280,12 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, req *http.Request) error {
 		return err
 	}
 	defer f.Close()
-	typ, r, err := detectContentType(f, fh)
+	typ, r, err := detectContentType(f, fh.Filename, fh.Header.Get("Content-Type"))
 	if err != nil {
 		return err
 	}
 	fi := fileInfo{Name: fixMultipartPath(fh.Filename), From: remoteAddr(req)}
-	name, err := s.store.put(r, &fi)
+	name, err := s.put(r, &fi)
 	if err != nil {
 		return err
 	}
@@ -200,7 +294,7 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, req *http.Request) error {
 	return err
 }
 
-// validate and splits a path like <hash>.ext
+// validates and splits a path like <hash>.ext
 func cleanPath(p string) (string, string) {
 	p = strings.TrimLeft(path.Clean(p), "/")
 	if strings.ContainsAny(p, "/\\") {
@@ -212,28 +306,46 @@ func cleanPath(p string) (string, string) {
 // escape file name for content-disposition header
 var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 
+func serveHeaders(w http.ResponseWriter, typ string, fi *fileInfo) {
+	w.Header().Set("Content-Type", typ)
+	if n := fi.Name; n != "" {
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(n)))
+	}
+}
+
 func (s *fileHost) serveFile(w http.ResponseWriter, req *http.Request) error {
 	hash, ext := cleanPath(req.URL.Path)
 	if hash == "" {
-		return errBadRequest
+		return errNotExist
 	}
-	f, err := s.store.get(hash)
+	fi, err := s.get(hash)
 	if err != nil {
 		return err
 	}
-	defer f.r.Close()
 	typ := mime.TypeByExtension(ext)
 	if typ == "" {
 		typ = "application/octet-stream"
 	}
-	w.Header().Set("Content-Type", typ)
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if n := f.info.Name; n != "" {
-		w.Header().Set("Content-Disposition",
-			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(n)))
+	if s.config.XAccel {
+		serveHeaders(w, typ, fi)
+		w.Header().Set("X-Accel-Redirect", path.Join(s.config.XAccelPath, hash))
+	} else {
+		p := s.pathTo(hash)
+		st, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		serveHeaders(w, typ, fi)
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeContent(w, req, hash, st.ModTime(), f)
 	}
-	http.ServeContent(w, req, hash, f.mtime, f.r)
 	return nil
 }
 
@@ -249,7 +361,7 @@ func main() {
 	if err != nil {
 		l.Fatal(err)
 	}
-	s, err := openStore(*storePath, c.Seed)
+	fh, err := newFileHost(*storePath, c, l)
 	if err != nil {
 		l.Fatal(err)
 	}
@@ -258,7 +370,7 @@ func main() {
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		Handler:      &fileHost{s, c, l},
+		Handler:      fh,
 	}
 	l.Fatal(srv.ListenAndServe())
 }
