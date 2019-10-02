@@ -1,0 +1,5 @@
+logging
+turn auth into middleware
+use a router?
+switch to protobufs/*
+turn the whole thing into middleware
