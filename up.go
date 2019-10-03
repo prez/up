@@ -57,6 +57,7 @@ type FileInfo struct {
 type FileStore interface {
 	Put(r io.Reader, fi *FileInfo) (hash string, err error)
 	Get(hash string) (r ReadSeekCloser, fi *FileInfo, err error)
+	Close() error
 }
 
 var filesBucket = []byte("files")
@@ -67,13 +68,13 @@ type fileStore struct {
 	db   *bolt.DB
 }
 
-func newFileStore(p string, hasher func() hash.Hash) (FileStore, error) {
+func openFileStore(p string, hasher func() hash.Hash) (FileStore, error) {
 	err := os.MkdirAll(filepath.Join(p, "public"), 0700)
 	if err != nil {
 		return nil, err
 	}
 	db, err := bolt.Open(filepath.Join(p, "db"),
-		0600, &bolt.Options{Timeout: time.Second})
+		0600, &bolt.Options{Timeout: time.Millisecond})
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +83,10 @@ func newFileStore(p string, hasher func() hash.Hash) (FileStore, error) {
 		return err
 	})
 	return &fileStore{p, hasher, db}, err
+}
+
+func (fs *fileStore) Close() error {
+	return fs.db.Close()
 }
 
 func readToTemp(dir string, r io.Reader) (string, error) {
@@ -139,7 +144,7 @@ func (fs *fileStore) Put(r io.Reader, fi *FileInfo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(hash), os.Chmod(fs.pathTo(string(hash)), 0644)
+	return string(hash), os.Chmod(fs.pathTo(string(hash)), 0600)
 }
 
 func (fs *fileStore) Get(hash string) (ReadSeekCloser, *FileInfo, error) {
@@ -181,14 +186,14 @@ type fileHost struct {
 	logger *log.Logger
 }
 
-func newFileHost(p string, tls bool, c *config, l *log.Logger) (*fileHost, error) {
+func openFileHost(p string, tls bool, c *config, l *log.Logger) (*fileHost, error) {
 	// check hash seed length
 	if len(c.Seed) < 32 {
 		return nil, errors.New("seed too short")
 	}
 	// seeded sha256
 	hasher := func() hash.Hash { hw := sha256.New(); hw.Write([]byte(c.Seed)); return hw }
-	fs, err := newFileStore(p, hasher)
+	fs, err := openFileStore(p, hasher)
 	return &fileHost{fs, tls, c, l}, err
 }
 
@@ -210,7 +215,7 @@ func checkKey(k string, keys []string) bool {
 	if len(k) < 20 || len(k) > 100 {
 		return false
 	}
-	for _, bs := range keys {
+	for _, b := range keys {
 		if len(k) == len(b) && subtle.ConstantTimeCompare([]byte(k), []byte(b)) == 1 {
 			return true
 		}
@@ -252,7 +257,7 @@ func detectContentType(r io.Reader, name string, typ string) (string, io.Reader,
 	preview := make([]byte, 512)
 	n, err := io.ReadFull(r, preview)
 	switch {
-	case err == io.ErrUnexpectedEOF:
+	case err == io.ErrUnexpectedEOF || err == io.EOF:
 		preview = preview[:n]
 		r = bytes.NewReader(preview)
 	case err != nil:
@@ -276,13 +281,13 @@ func extensionByType(typ string) string {
 }
 
 func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
-	if r.ContentLength > s.config.MaxSize {
-		return errSizeLimit
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxSize)
 	k := r.FormValue("k")
 	if !checkKey(k, s.config.Keys) {
 		return errUnauthorized
+	}
+	if r.ContentLength > s.config.MaxSize {
+		return errSizeLimit
 	}
 	f, fh, err := r.FormFile("f")
 	if err != nil {
@@ -298,6 +303,7 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	s.logger.Printf("received file %q (%s) from %s", fh.Filename, name, r.RemoteAddr)
 	_, err = fmt.Fprintf(w, "%s/%s%s\n",
 		s.config.ExternalURL, name, extensionByType(typ))
 	return err
@@ -343,7 +349,7 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 
 func (s *fileHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// redirect / to https
-	if s.tls && strings.TrimLeft(path.Clean(r.URL.Path), "/") == "" {
+	if s.tls && r.TLS == nil && strings.TrimLeft(path.Clean(r.URL.Path), "/") == "" {
 		http.Redirect(w, r, "https://"+r.Host, http.StatusMovedPermanently)
 		return
 	}
@@ -377,7 +383,7 @@ func main() {
 	if err != nil {
 		l.Fatal(err)
 	}
-	h, err := newFileHost(*storePath, *tlsAddr != "", c, l)
+	h, err := openFileHost(*storePath, *tlsAddr != "", c, l)
 	if err != nil {
 		l.Fatal(err)
 	}
