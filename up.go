@@ -355,8 +355,6 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 		w.Header().Set("Content-Disposition",
 			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(n)))
 	}
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, hash, time.Time{}, f)
 	return nil
 }
