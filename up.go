@@ -14,6 +14,7 @@ import (
 	"io/ioutil"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -284,6 +285,15 @@ func extensionByType(typ string) string {
 	return ""
 }
 
+// XXX: doesn't support X-Forwarded-For
+func remoteAddr(req *http.Request) string {
+	h := req.Header.Get("X-Real-IP")
+	if h == "" {
+		h, _, _ = net.SplitHostPort(req.RemoteAddr)
+	}
+	return h
+}
+
 func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
 	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxSize)
 	k := r.FormValue("k")
@@ -302,12 +312,12 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	fi := FileInfo{Name: fixMultipartPath(fh.Filename), From: r.RemoteAddr}
+	fi := FileInfo{Name: fixMultipartPath(fh.Filename), From: remoteAddr(r)}
 	name, err := s.Put(rd, &fi)
 	if err != nil {
 		return err
 	}
-	s.logger.Printf("received file %q (%s) from %s", fh.Filename, name, r.RemoteAddr)
+	s.logger.Printf("received file %q (%s) from %s", fh.Filename, name, remoteAddr(r))
 	_, err = fmt.Fprintf(w, "%s/%s%s\n",
 		s.config.ExternalURL, name, extensionByType(typ))
 	return err
@@ -367,7 +377,7 @@ func (s *fileHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = errNotExist
 	}
 	if err != nil {
-		s.logger.Printf("%s: %s", r.RemoteAddr, err)
+		s.logger.Printf("%s: %s", remoteAddr(r), err)
 		code, text := toHTTPError(err)
 		http.Error(w, text, code)
 	}
