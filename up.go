@@ -103,7 +103,9 @@ func readToTemp(dir string, r io.Reader) (string, error) {
 	return tn, err
 }
 
-func (fs *fileStore) pathTo(hash string) string { return filepath.Join(fs.path, "public", hash) }
+func (fs *fileStore) pathTo(hash string) string {
+	return filepath.Join(fs.path, "public", hash)
+}
 
 func b64(b []byte) []byte {
 	enc := base64.RawURLEncoding
@@ -166,7 +168,7 @@ func (fs *fileStore) Get(hash string) (ReadSeekCloser, *FileInfo, error) {
 type config struct {
 	ExternalURL string   `json:"external_url"` // External URL (for links)
 	MaxSize     int64    `json:"max_size"`     // Maximum file size
-	Seed        string   `json:"seed"`         // File hash seed
+	Seed        []byte   `json:"seed"`         // File hash seed
 	Keys        []string `json:"keys"`         // Uploader keys
 }
 
@@ -186,13 +188,15 @@ type fileHost struct {
 	logger *log.Logger
 }
 
+func seededHasher(seed []byte) func() hash.Hash {
+	return func() hash.Hash { hw := sha256.New(); hw.Write(seed); return hw }
+}
+
 func openFileHost(p string, tls bool, c *config, l *log.Logger) (*fileHost, error) {
-	// check hash seed length
 	if len(c.Seed) < 32 {
 		return nil, errors.New("seed too short")
 	}
-	// seeded sha256
-	hasher := func() hash.Hash { hw := sha256.New(); hw.Write([]byte(c.Seed)); return hw }
+	hasher := seededHasher(c.Seed)
 	fs, err := openFileStore(p, hasher)
 	return &fileHost{fs, tls, c, l}, err
 }
@@ -387,6 +391,7 @@ func main() {
 	if err != nil {
 		l.Fatal(err)
 	}
+	defer h.Close()
 	if *acmeHost != "" {
 		m := &autocert.Manager{
 			Cache:      autocert.DirCache(filepath.Join(*storePath, "acme")),

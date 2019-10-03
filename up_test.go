@@ -29,7 +29,17 @@ var testFiles = []testFile{
 	{"empty", FileInfo{}, []byte{}},
 	{"1 byte", FileInfo{}, []byte{'a'}},
 	{"partial info", FileInfo{From: "ip address"}, []byte("partialinfo")},
-	{"max size", FileInfo{}, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")},
+	{"max size", FileInfo{}, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+	},
 }
 
 func hashBytes(b []byte, h func() hash.Hash) string {
@@ -166,9 +176,10 @@ func TestFileStore(t *testing.T) {
 const (
 	invalidKey = "invalid____________________"
 	shortKey   = "shortKey"
-	longKey    = "loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooongkey"
-	goodKey    = "goodkey____________________"
-	emptyKey   = ""
+	longKey    = "looooooooooooooooooooooooooooooooooooooooooooooooooooooooo" +
+		"ooooooooooooooooooooooooooooooooooooooooooooooooongkey"
+	goodKey  = "goodkey____________________"
+	emptyKey = ""
 )
 
 var testKeys = []string{shortKey, longKey, goodKey, emptyKey, invalidKey}
@@ -176,19 +187,16 @@ var testKeys = []string{shortKey, longKey, goodKey, emptyKey, invalidKey}
 var testConfig = config{
 	ExternalURL: "http://example.org",
 	MaxSize:     500,
-	Seed:        "wd394094f9c8ngdlofip08h4p8go7bdcv",
+	Seed:        []byte("wd394094f9c8ngdlofip08h4p8go7bdcv"),
 	Keys:        []string{shortKey, longKey, goodKey, emptyKey},
 }
 
-func testSeededHasher() hash.Hash {
-	hw := sha256.New()
-	hw.Write([]byte(testConfig.Seed))
-	return hw
-}
+var testSeededHasher = seededHasher(testConfig.Seed)
 
 func testLogger(t testing.TB) *log.Logger {
 	t.Helper()
-	return log.New(testWriter{TB: t}, t.Name()+" ", log.LstdFlags|log.Lshortfile|log.LUTC)
+	return log.New(testWriter{TB: t}, t.Name()+" ",
+		log.LstdFlags|log.Lshortfile|log.LUTC)
 }
 
 type testWriter struct {
@@ -266,7 +274,8 @@ func TestFileHost(t *testing.T) {
 			t.Errorf("status code = %d, want 200", resp.StatusCode)
 		}
 		if bytes.Compare(body, f.b) != 0 {
-			t.Errorf("body = %q, want %q\n%#v", string(body), string(f.b), req.URL)
+			t.Errorf("body = %q, want %q\n%#v", string(body), string(f.b),
+				req.URL)
 		}
 	}
 
