@@ -29,17 +29,7 @@ var testFiles = []testFile{
 	{"empty", FileInfo{}, []byte{}},
 	{"1 byte", FileInfo{}, []byte{'a'}},
 	{"partial info", FileInfo{From: "ip address"}, []byte("partialinfo")},
-	{"max size", FileInfo{}, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" +
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-	},
+	{"max size", FileInfo{}, bytes.Repeat([]byte{'a'}, 5000)},
 }
 
 func hashBytes(b []byte, h func() hash.Hash) string {
@@ -98,6 +88,7 @@ func TestFileStore(t *testing.T) {
 		for n := 0; n < 20; n++ {
 			for _, f := range testFiles {
 				t.Run(f.name, func(t *testing.T) {
+					t.Parallel()
 					testPutGet(t, f)
 				})
 			}
@@ -284,6 +275,7 @@ func TestFileHost(t *testing.T) {
 			for _, f := range testFiles {
 				for _, key := range testKeys {
 					t.Run(f.name+"/"+key, func(t *testing.T) {
+						t.Parallel()
 						testPutGet(t, key, f)
 					})
 				}
