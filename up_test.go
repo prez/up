@@ -43,7 +43,7 @@ func TestFileStore(t *testing.T) {
 	var storeDir = filepath.Join("testdata", "tmpstore1")
 	fs, err := openFileStore(storeDir, testHasher)
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 	defer os.RemoveAll(storeDir)
 	defer fs.Close()
@@ -51,15 +51,15 @@ func TestFileStore(t *testing.T) {
 	testPutGet := func(t *testing.T, f testFile) {
 		hash, err := fs.Put(bytes.NewReader(f.b), &f.fi)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		want := hashBytes(f.b, testHasher)
 		if hash != want {
-			t.Errorf("hash = %s, want %s", hash, want)
+			t.Fatalf("hash = %s, want %s", hash, want)
 		}
 		st, err := os.Stat(filepath.Join(storeDir, "public", hash))
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		if sz := st.Size(); sz != int64(len(f.b)) {
 			t.Errorf("st.Size() = %d, want %d", sz, len(f.b))
@@ -69,12 +69,12 @@ func TestFileStore(t *testing.T) {
 		}
 		r, fi, err := fs.Get(hash)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		defer r.Close()
 		b, err := ioutil.ReadAll(r)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		if bytes.Compare(b, f.b) != 0 {
 			t.Errorf("bytes = %#v, want %#v", b, f.b)
@@ -100,7 +100,7 @@ func TestFileStore(t *testing.T) {
 	testModifiedInfo := func(t *testing.T, f testFile) {
 		hash, err := fs.Put(bytes.NewReader(f.b), fiModified)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		want := hashBytes(f.b, testHasher)
 		if hash != want {
@@ -109,7 +109,7 @@ func TestFileStore(t *testing.T) {
 		fs.Get(hash)
 		r, fi, err := fs.Get(hash)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		defer r.Close()
 		if *fi != f.fi {
@@ -130,11 +130,11 @@ func TestFileStore(t *testing.T) {
 		r := iotest.TimeoutReader(bytes.NewReader([]byte("readererror")))
 		_, err := fs.Put(r, &FileInfo{"name", "ip address"})
 		if err == nil {
-			t.Error("expected error")
+			t.Fatal("expected error")
 		}
 		ls, err := ioutil.ReadDir(storeDir)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
 		for _, f := range ls {
 			if f.Name() != "public" && f.Name() != "db" {
@@ -146,7 +146,7 @@ func TestFileStore(t *testing.T) {
 	t.Run("concurrent open", func(t *testing.T) {
 		_, err := openFileStore(storeDir, testHasher)
 		if err == nil {
-			t.Error("concurrent open worked")
+			t.Fatal("concurrent open worked")
 		}
 	})
 
@@ -154,13 +154,13 @@ func TestFileStore(t *testing.T) {
 		for _, h := range []string{"wronghash", ""} {
 			_, _, err := fs.Get(h)
 			if err == nil {
-				t.Error("found nonexistent hash")
+				t.Fatal("found nonexistent hash")
 			}
 		}
 	})
 
 	if err := fs.Close(); err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 }
 
@@ -179,7 +179,7 @@ var testConfig = config{
 	ExternalURL: "http://example.org",
 	MaxSize:     500,
 	Seed:        []byte("wd394094f9c8ngdlofip08h4p8go7bdcv"),
-	Keys:        []string{shortKey, longKey, goodKey, emptyKey},
+	Keys:        []string{goodKey},
 }
 
 var testSeededHasher = seededHasher(testConfig.Seed)
@@ -200,6 +200,28 @@ func (tw testWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+func multipartBody(key string, f testFile) ([]byte, string, error) {
+	b := bytes.NewBuffer(nil)
+	w := multipart.NewWriter(b)
+	w.WriteField("k", key)
+	name := f.fi.Name
+	if name == "" {
+		// go's multipart file parser doesn't like empty file names
+		name = "filename"
+	}
+	fw, err := w.CreateFormFile("f", name)
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := fw.Write(f.b); err != nil {
+		return nil, "", err
+	}
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
+	return b.Bytes(), w.FormDataContentType(), err
+}
+
 func TestFileHost(t *testing.T) {
 	t.Parallel()
 	var storeDir = filepath.Join("testdata", "tmpstore2")
@@ -212,49 +234,35 @@ func TestFileHost(t *testing.T) {
 	defer h.Close()
 
 	testPutGet := func(t *testing.T, key string, f testFile) {
-		b := bytes.NewBuffer(nil)
-		w := multipart.NewWriter(b)
-		w.WriteField("k", key)
-		name := f.fi.Name
-		if name == "" {
-			name = "filename"
-		}
-		fw, err := w.CreateFormFile("f", name)
+		b, ct, err := multipartBody(key, f)
 		if err != nil {
-			t.Error(err)
+			t.Fatal(err)
 		}
-		if _, err := fw.Write(f.b); err != nil {
-			t.Error(err)
-		}
-		if err := w.Close(); err != nil {
-			t.Error(err)
-		}
-		s := b.String()
-		req := httptest.NewRequest("POST", "https://dummy.org/", b)
-		req.Header.Set("Content-Type", w.FormDataContentType())
+		req := httptest.NewRequest("POST", "https://dummy.org/", bytes.NewReader(b))
+		req.Header.Set("Content-Type", ct)
 		rw := httptest.NewRecorder()
 		h.ServeHTTP(rw, req)
 		resp := rw.Result()
 		body, _ := ioutil.ReadAll(resp.Body)
 		if key != goodKey {
 			if resp.StatusCode != 403 {
-				t.Errorf("accepted invalid key: %q\n%#v", key, resp)
+				t.Fatalf("accepted invalid key: %q\n%#v", key, resp)
 			}
 			return
 		}
-		if int64(len(f.b)) > testConfig.MaxSize {
+		if int64(len(b)) > testConfig.MaxSize {
 			if resp.StatusCode != 413 && resp.StatusCode != 403 {
-				t.Errorf("accepted too large file: %#v\n%#v", f, resp)
+				t.Fatalf("accepted too large file: %#v\n%#v", f, resp)
 			}
 			return
 		}
 		if resp.StatusCode != 200 {
-			t.Errorf("status code != 200: %q\n%#v\n%#v\n%q", key, f, resp, s)
+			t.Fatalf("status code != 200: %q\n%#v\n%#v", key, f, resp)
 		}
 		wantHash := hashBytes(f.b, testSeededHasher)
 		wantPrefix := fmt.Sprintf("%s/%s", testConfig.ExternalURL, wantHash)
 		if !strings.HasPrefix(string(body), wantPrefix) {
-			t.Errorf("incorrect response: %q", string(body))
+			t.Fatalf("incorrect response: %q", string(body))
 		}
 		req = httptest.NewRequest("GET", "https://dummy.org/"+wantHash, nil)
 		rw = httptest.NewRecorder()
@@ -262,11 +270,10 @@ func TestFileHost(t *testing.T) {
 		resp = rw.Result()
 		body, _ = ioutil.ReadAll(resp.Body)
 		if resp.StatusCode != 200 {
-			t.Errorf("status code = %d, want 200", resp.StatusCode)
+			t.Fatalf("status code = %d, want 200", resp.StatusCode)
 		}
 		if bytes.Compare(body, f.b) != 0 {
-			t.Errorf("body = %q, want %q\n%#v", string(body), string(f.b),
-				req.URL)
+			t.Fatalf("body = %q, want %q\n%#v", string(body), string(f.b), req.URL)
 		}
 	}
 
@@ -292,4 +299,10 @@ func TestFileHost(t *testing.T) {
 			t.Errorf("status code = %d, want 301", resp.StatusCode)
 		}
 	})
+
+	// TODO: more malicious requests
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
