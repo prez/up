@@ -20,16 +20,16 @@ var testHasher = sha256.New
 
 type testFile struct {
 	name string
-	fi   FileInfo
+	fi   fileInfo
 	b    []byte
 }
 
 var testFiles = []testFile{
-	{"test", FileInfo{"filename", "ip address"}, []byte("test")},
-	{"empty", FileInfo{}, []byte{}},
-	{"1 byte", FileInfo{}, []byte{'a'}},
-	{"partial info", FileInfo{From: "ip address"}, []byte("partialinfo")},
-	{"max size", FileInfo{}, bytes.Repeat([]byte{'a'}, 5000)},
+	{"test", fileInfo{"filename", "ip address"}, []byte("test")},
+	{"empty", fileInfo{}, []byte{}},
+	{"1 byte", fileInfo{}, []byte{'a'}},
+	{"partial info", fileInfo{From: "ip address"}, []byte("partialinfo")},
+	{"max size", fileInfo{}, bytes.Repeat([]byte{'a'}, 5000)},
 }
 
 func hashBytes(b []byte, h func() hash.Hash) string {
@@ -64,8 +64,8 @@ func TestFileStore(t *testing.T) {
 		if sz := st.Size(); sz != int64(len(f.b)) {
 			t.Errorf("st.Size() = %d, want %d", sz, len(f.b))
 		}
-		if mode := st.Mode(); mode != 0600 {
-			t.Errorf("st.Mode() = %o, want 0600", mode)
+		if mode := st.Mode(); mode != 0644 {
+			t.Errorf("st.Mode() = 0%o, want 0644", mode)
 		}
 		r, fi, err := fs.Get(hash)
 		if err != nil {
@@ -95,7 +95,7 @@ func TestFileStore(t *testing.T) {
 		}
 	})
 
-	fiModified := &FileInfo{"modified name", "modified ip address"}
+	fiModified := &fileInfo{"modified name", "modified ip address"}
 
 	testModifiedInfo := func(t *testing.T, f testFile) {
 		hash, err := fs.Put(bytes.NewReader(f.b), fiModified)
@@ -128,7 +128,7 @@ func TestFileStore(t *testing.T) {
 
 	t.Run("reader error", func(t *testing.T) {
 		r := iotest.TimeoutReader(bytes.NewReader([]byte("readererror")))
-		_, err := fs.Put(r, &FileInfo{"name", "ip address"})
+		_, err := fs.Put(r, &fileInfo{"name", "ip address"})
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -226,7 +226,7 @@ func TestFileHost(t *testing.T) {
 	t.Parallel()
 	var storeDir = filepath.Join("testdata", "tmpstore2")
 	l := testLogger(t)
-	h, err := openFileHost(storeDir, true, &testConfig, l)
+	h, err := openFileHost(storeDir, &testConfig, l)
 	if err != nil {
 		t.Error(err)
 	}
@@ -287,16 +287,6 @@ func TestFileHost(t *testing.T) {
 					})
 				}
 			}
-		}
-	})
-
-	t.Run("https redirect", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "http://dummy.org/", nil)
-		rw := httptest.NewRecorder()
-		h.ServeHTTP(rw, req)
-		resp := rw.Result()
-		if resp.StatusCode != 301 {
-			t.Errorf("status code = %d, want 301", resp.StatusCode)
 		}
 	})
 
