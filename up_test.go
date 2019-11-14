@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"hash"
 	"io/ioutil"
@@ -35,7 +36,7 @@ var testFiles = []testFile{
 func hashBytes(b []byte, h func() hash.Hash) string {
 	hw := h()
 	hw.Write(b)
-	return string(b64(hw.Sum(nil)))
+	return base64.RawURLEncoding.EncodeToString(hw.Sum(nil))
 }
 
 func TestFileStore(t *testing.T) {
@@ -44,7 +45,7 @@ func TestFileStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll("testdata")
+	defer os.RemoveAll(storeDir)
 	defer fs.Close()
 
 	testPutGet := func(t *testing.T, f testFile) {
@@ -66,7 +67,11 @@ func TestFileStore(t *testing.T) {
 		if mode := st.Mode(); mode != 0644 {
 			t.Errorf("st.Mode() = 0%o, want 0644", mode)
 		}
-		r, name, err := fs.Get(hash)
+		name, err := fs.Get(hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := fs.Open(hash)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,8 +88,12 @@ func TestFileStore(t *testing.T) {
 		}
 	}
 
+	n := 500
+	if testing.Short() {
+		n = 5
+	}
 	t.Run("parallel put/get", func(t *testing.T) {
-		for n := 0; n < 20; n++ {
+		for ; n > 0; n-- {
 			for _, f := range testFiles {
 				t.Run(f.name, func(t *testing.T) {
 					t.Parallel()
@@ -106,7 +115,11 @@ func TestFileStore(t *testing.T) {
 			t.Errorf("hash = %s, want %s", hash, want)
 		}
 		fs.Get(hash)
-		r, name, err := fs.Get(hash)
+		name, err := fs.Get(hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := fs.Open(hash)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +166,7 @@ func TestFileStore(t *testing.T) {
 
 	t.Run("nonexistent hashes", func(t *testing.T) {
 		for _, h := range []string{"wronghash", ""} {
-			_, _, err := fs.Get(h)
+			_, err := fs.Get(h)
 			if err == nil {
 				t.Fatal("found nonexistent hash")
 			}
@@ -163,6 +176,65 @@ func TestFileStore(t *testing.T) {
 	if err := fs.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func BenchmarkStore(b *testing.B) {
+	var storeDir = filepath.Join("testdata", "benchstore1")
+	fs, err := openFileStore(storeDir, testHasher)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer os.RemoveAll(storeDir)
+	defer fs.Close()
+
+	for i := 0; i < 10; i++ {
+		data := fmt.Sprintf("%010x", i)
+		fi := fileInfo{data, data}
+		_, err := fs.Put(strings.NewReader(data), &fi)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+
+	key := hashBytes([]byte(fmt.Sprintf("%010x", 0)), testHasher)
+	b.Run("get", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			_, err := fs.Get(key)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("parallel get", func(b *testing.B) {
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				_, err := fs.Get(key)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	})
+
+	b.Run("put", func(b *testing.B) {
+		storeDir := filepath.Join("testdata", "benchstore2")
+		fs, err := openFileStore(storeDir, testHasher)
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer os.RemoveAll(storeDir)
+		defer fs.Close()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			data := fmt.Sprintf("%010x", i)
+			fi := fileInfo{data, data}
+			_, err := fs.Put(strings.NewReader(data), &fi)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 const (
@@ -238,7 +310,7 @@ func TestFileHost(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll("testdata")
+	defer os.RemoveAll(storeDir)
 	defer h.Close()
 
 	testPutGet := func(t *testing.T, key string, f testFile) {
@@ -285,8 +357,12 @@ func TestFileHost(t *testing.T) {
 		}
 	}
 
+	n := 500
+	if testing.Short() {
+		n = 5
+	}
 	t.Run("parallel put/get", func(t *testing.T) {
-		for n := 0; n < 20; n++ {
+		for ; n > 0; n-- {
 			for _, f := range testFiles {
 				for _, key := range testKeys {
 					t.Run(f.name+"/"+key.name, func(t *testing.T) {

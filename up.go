@@ -22,6 +22,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,10 +52,11 @@ type fileInfo struct{ Name, From string }
 var filesBucket = []byte("files")
 
 type fileStore struct {
-	path string
-	hash func() hash.Hash
-	db   *bolt.DB
-	log  io.Writer
+	path    string
+	hash    func() hash.Hash
+	db      *bolt.DB
+	log     io.WriteCloser
+	putLock sync.Mutex
 }
 
 func openFileStore(p string, hash func() hash.Hash) (*fileStore, error) {
@@ -71,13 +73,16 @@ func openFileStore(p string, hash func() hash.Hash) (*fileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fileStore{p, hash, db, l}, db.Update(func(tx *bolt.Tx) error {
+	return &fileStore{p, hash, db, l, sync.Mutex{}}, db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists(filesBucket)
 		return err
 	})
 }
 
-func (fs *fileStore) Close() error { return fs.db.Close() }
+func (fs *fileStore) Close() error {
+	fs.log.Close()
+	return fs.db.Close()
+}
 
 func readToTemp(dir string, r io.Reader) (string, error) {
 	tf, err := ioutil.TempFile(dir, "tmp-")
@@ -103,34 +108,36 @@ func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// clean up on errors
 	defer os.Remove(tempName)
 	hash := b64(hw.Sum(nil))
-	exists := false
-	err = fs.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(filesBucket)
-		if b.Get([]byte(hash)) != nil {
-			exists = true
-			return nil
-		}
-		_, err := fmt.Fprintf(fs.log, "%q (%s) from %s\n",
-			fi.Name, hash, fi.From)
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(hash), []byte(fi.Name))
-	})
-	if exists || err != nil {
+	fs.putLock.Lock()
+	defer fs.putLock.Unlock()
+	// check if file already exists
+	if _, err = fs.Get(hash); err != errNotExist {
 		return hash, err
 	}
+	// log uploader ip
+	_, err = fmt.Fprintf(fs.log, "%s %q (%s) from %s\n",
+		time.Now().Format(time.RFC3339), fi.Name, hash, fi.From)
+	if err != nil {
+		return hash, err
+	}
+	// set correct mode
+	if err := os.Chmod(tempName, 0644); err != nil {
+		return "", err
+	}
+	// move temp file to store
 	p := filepath.Join(fs.path, "public", hash)
 	if err := os.Rename(tempName, p); err != nil {
 		return "", err
 	}
-	return hash, os.Chmod(p, 0644)
+	// add to db
+	return hash, fs.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(filesBucket).Put([]byte(hash), []byte(fi.Name))
+	})
 }
 
-func (fs *fileStore) Get(hash string) (http.File, string, error) {
+func (fs *fileStore) Get(hash string) (string, error) {
 	b := []byte(nil)
 	err := fs.db.View(func(tx *bolt.Tx) error {
 		b = tx.Bucket(filesBucket).Get([]byte(hash))
@@ -140,10 +147,13 @@ func (fs *fileStore) Get(hash string) (http.File, string, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
-	f, err := http.Dir(filepath.Join(fs.path, "public")).Open(hash)
-	return f, string(b), err
+	return string(b), err
+}
+
+func (fs *fileStore) Open(hash string) (http.File, error) {
+	return http.Dir(filepath.Join(fs.path, "public")).Open(hash)
 }
 
 type config struct {
@@ -164,7 +174,7 @@ func parseConfig(p string) (*config, error) {
 }
 
 type fileHost struct {
-	fileStore
+	*fileStore
 	config *config
 	logger *log.Logger
 }
@@ -178,7 +188,7 @@ func openFileHost(p string, c *config, l *log.Logger) (*fileHost, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fileHost{*fs, c, l}, err
+	return &fileHost{fs, c, l}, err
 }
 
 // attempt to check uploader key safely
@@ -308,11 +318,10 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	if hash == "" {
 		return errNotExist
 	}
-	f, name, err := s.Get(hash)
+	name, err := s.Get(hash)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 	typ := mime.TypeByExtension(ext)
 	if typ == "" {
 		typ = "application/octet-stream"
@@ -324,10 +333,15 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	}
 	if s.config.XAccelPath != "" {
 		w.Header().Set("X-Accel-Redirect", path.Join(s.config.XAccelPath, hash))
-	} else {
-		w.Header().Set("ETag", hash)
-		http.ServeContent(w, r, hash, time.Time{}, f)
+		return nil
 	}
+	w.Header().Set("ETag", hash)
+	f, err := s.Open(hash)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	http.ServeContent(w, r, hash, time.Time{}, f)
 	return nil
 }
 
@@ -352,7 +366,7 @@ func (s *fileHost) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = s.serveFile(w, r)
 	}
 	if err != nil {
-		s.logger.Printf(`%s %s`, remoteAddr(r), err)
+		s.logger.Printf("%s %s", remoteAddr(r), err)
 		code, text := toHTTPError(err)
 		http.Error(w, text, code)
 	}
