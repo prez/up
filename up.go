@@ -30,7 +30,7 @@ import (
 
 var extOverride = map[string]string{
 	"image/gif":                ".gif",
-	"image/jpeg":               ".jpg",
+	"image/jpeg":               ".jpeg",
 	"image/png":                ".png",
 	"image/svg+xml":            ".svg",
 	"text/html":                ".html",
@@ -46,10 +46,7 @@ var (
 	errSizeLimit    = errors.New("size limit exceeded")
 )
 
-type fileInfo struct {
-	Name string `json:"name,omitempty"`
-	From string `json:"ip,omitempty"`
-}
+type fileInfo struct{ Name, From string }
 
 var filesBucket = []byte("files")
 
@@ -57,6 +54,7 @@ type fileStore struct {
 	path string
 	hash func() hash.Hash
 	db   *bolt.DB
+	log  io.Writer
 }
 
 func openFileStore(p string, hash func() hash.Hash) (*fileStore, error) {
@@ -68,7 +66,12 @@ func openFileStore(p string, hash func() hash.Hash) (*fileStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &fileStore{p, hash, db}, db.Update(func(tx *bolt.Tx) error {
+	l, err := os.OpenFile(filepath.Join(p, "log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	return &fileStore{p, hash, db, l}, db.Update(func(tx *bolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists(filesBucket)
 		return err
 	})
@@ -103,10 +106,6 @@ func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
 	// clean up on errors
 	defer os.Remove(tempName)
 	hash := b64(hw.Sum(nil))
-	fib, err := json.Marshal(fi)
-	if err != nil {
-		return "", err
-	}
 	exists := false
 	err = fs.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(filesBucket)
@@ -114,7 +113,12 @@ func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
 			exists = true
 			return nil
 		}
-		return b.Put([]byte(hash), fib)
+		_, err := fmt.Fprintf(fs.log, "%q (%s) from %s\n",
+			fi.Name, hash, fi.From)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), []byte(fi.Name))
 	})
 	if exists || err != nil {
 		return hash, err
@@ -126,20 +130,20 @@ func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
 	return hash, os.Chmod(p, 0644)
 }
 
-func (fs *fileStore) Get(hash string) (http.File, *fileInfo, error) {
-	fi := &fileInfo{}
+func (fs *fileStore) Get(hash string) (http.File, string, error) {
+	b := []byte(nil)
 	err := fs.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(filesBucket).Get([]byte(hash))
+		b = tx.Bucket(filesBucket).Get([]byte(hash))
 		if b == nil {
 			return errNotExist
 		}
-		return json.Unmarshal(b, fi)
+		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, "", err
 	}
 	f, err := http.Dir(filepath.Join(fs.path, "public")).Open(hash)
-	return f, fi, err
+	return f, string(b), err
 }
 
 type config struct {
@@ -304,7 +308,7 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	if hash == "" {
 		return errNotExist
 	}
-	f, fi, err := s.Get(hash)
+	f, name, err := s.Get(hash)
 	if err != nil {
 		return err
 	}
@@ -314,9 +318,9 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 		typ = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", typ)
-	if n := fi.Name; n != "" {
+	if name != "" {
 		w.Header().Set("Content-Disposition",
-			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(n)))
+			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(name)))
 	}
 	if s.config.XAccelPath != "" {
 		w.Header().Set("X-Accel-Redirect", path.Join(s.config.XAccelPath, hash))
@@ -385,6 +389,7 @@ func main() {
 		}
 		close(die)
 	}()
+	l.Printf("listening on %s", *addr)
 	if err := s.ListenAndServe(); err != http.ErrServerClosed {
 		log.Println(err)
 		return

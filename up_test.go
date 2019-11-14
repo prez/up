@@ -66,7 +66,7 @@ func TestFileStore(t *testing.T) {
 		if mode := st.Mode(); mode != 0644 {
 			t.Errorf("st.Mode() = 0%o, want 0644", mode)
 		}
-		r, fi, err := fs.Get(hash)
+		r, name, err := fs.Get(hash)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -75,11 +75,11 @@ func TestFileStore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Compare(b, f.b) != 0 {
+		if !bytes.Equal(b, f.b) {
 			t.Errorf("bytes = %#v, want %#v", b, f.b)
 		}
-		if *fi != f.fi {
-			t.Errorf("fi = %#v, want %#v", fi, f.fi)
+		if name != f.fi.Name {
+			t.Errorf("name = %q, want %q", name, f.fi.Name)
 		}
 	}
 
@@ -106,13 +106,13 @@ func TestFileStore(t *testing.T) {
 			t.Errorf("hash = %s, want %s", hash, want)
 		}
 		fs.Get(hash)
-		r, fi, err := fs.Get(hash)
+		r, name, err := fs.Get(hash)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer r.Close()
-		if *fi != f.fi {
-			t.Errorf("fi = %#v, want %#v", fi, f.fi)
+		if name != f.fi.Name {
+			t.Errorf("name = %q, want %q", name, f.fi.Name)
 		}
 	}
 
@@ -136,7 +136,9 @@ func TestFileStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, f := range ls {
-			if f.Name() != "public" && f.Name() != "db" {
+			switch f.Name() {
+			case "public", "db", "log":
+			default:
 				t.Errorf("stray temp file: %s", f.Name())
 			}
 		}
@@ -278,7 +280,7 @@ func TestFileHost(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Fatalf("status code = %d, want 200", resp.StatusCode)
 		}
-		if bytes.Compare(body, f.b) != 0 {
+		if !bytes.Equal(body, f.b) {
 			t.Fatalf("body = %q, want %q\n%#v", string(body), string(f.b), req.URL)
 		}
 	}
