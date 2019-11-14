@@ -39,13 +39,12 @@ func hashBytes(b []byte, h func() hash.Hash) string {
 }
 
 func TestFileStore(t *testing.T) {
-	t.Parallel()
 	var storeDir = filepath.Join("testdata", "tmpstore1")
 	fs, err := openFileStore(storeDir, testHasher)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.RemoveAll(storeDir)
+	defer os.RemoveAll("testdata")
 	defer fs.Close()
 
 	testPutGet := func(t *testing.T, f testFile) {
@@ -173,7 +172,15 @@ const (
 	emptyKey = ""
 )
 
-var testKeys = []string{shortKey, longKey, goodKey, emptyKey, invalidKey}
+type testKey struct{ key, name string }
+
+var testKeys = []testKey{
+	{shortKey, "short"},
+	{longKey, "long"},
+	{goodKey, "good"},
+	{emptyKey, "empty"},
+	{invalidKey, "invalid"},
+}
 
 var testConfig = config{
 	ExternalURL: "http://example.org",
@@ -223,14 +230,13 @@ func multipartBody(key string, f testFile) ([]byte, string, error) {
 }
 
 func TestFileHost(t *testing.T) {
-	t.Parallel()
 	var storeDir = filepath.Join("testdata", "tmpstore2")
 	l := testLogger(t)
 	h, err := openFileHost(storeDir, &testConfig, l)
 	if err != nil {
 		t.Error(err)
 	}
-	defer os.RemoveAll(storeDir)
+	defer os.RemoveAll("testdata")
 	defer h.Close()
 
 	testPutGet := func(t *testing.T, key string, f testFile) {
@@ -281,9 +287,9 @@ func TestFileHost(t *testing.T) {
 		for n := 0; n < 20; n++ {
 			for _, f := range testFiles {
 				for _, key := range testKeys {
-					t.Run(f.name+"/"+key, func(t *testing.T) {
+					t.Run(f.name+"/"+key.name, func(t *testing.T) {
 						t.Parallel()
-						testPutGet(t, key, f)
+						testPutGet(t, key.key, f)
 					})
 				}
 			}
