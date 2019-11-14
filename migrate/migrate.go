@@ -45,7 +45,12 @@ func run() error {
 		_, err := tx.CreateBucket(filesBucket)
 		return err
 	})
-	return olddb.View(func(tx *bolt.Tx) error {
+	ntx, err := newdb.Begin(true)
+	if err != nil {
+		return err
+	}
+	nb := ntx.Bucket(filesBucket)
+	err = olddb.View(func(tx *bolt.Tx) error {
 		return tx.Bucket(filesBucket).ForEach(func(k, v []byte) error {
 			fi := fileInfo{}
 			err := json.Unmarshal(v, &fi)
@@ -57,11 +62,13 @@ func run() error {
 			if err != nil {
 				return err
 			}
-			return newdb.Batch(func(tx *bolt.Tx) error {
-				return tx.Bucket(filesBucket).Put(k, []byte(fi.Name))
-			})
+			return nb.Put(k, []byte(fi.Name))
 		})
 	})
+	if err != nil {
+		return err
+	}
+	return ntx.Commit()
 }
 
 func main() {
