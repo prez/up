@@ -426,6 +426,7 @@ func main() {
 		// ReadTimeout/ReadHeaderTimeout
 		// WriteTimeout
 		IdleTimeout: 60 * time.Second,
+		ErrorLog:    l,
 		Handler:     fh,
 	}
 	// graceful shutdown support
