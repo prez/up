@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 )
@@ -20,17 +21,18 @@ import (
 var testHasher = sha256.New
 
 type testFile struct {
+	desc string
 	name string
-	fi   fileInfo
+	from string
 	b    []byte
 }
 
 var testFiles = []testFile{
-	{"test", fileInfo{"filename", "ip address"}, []byte("test")},
-	{"empty", fileInfo{}, []byte{}},
-	{"1 byte", fileInfo{}, []byte{'a'}},
-	{"partial info", fileInfo{From: "ip address"}, []byte("partialinfo")},
-	{"max size", fileInfo{}, bytes.Repeat([]byte{'a'}, 5000)},
+	{"test", "filename", "ip address", []byte("test")},
+	{"empty", "", "", []byte{}},
+	{"1 byte", "", "", []byte{'a'}},
+	{"partial info", "", "ip address", []byte("partialinfo")},
+	{"max size", "", "", bytes.Repeat([]byte{'a'}, 5000)},
 }
 
 func hashBytes(b []byte, h func() hash.Hash) string {
@@ -49,7 +51,7 @@ func TestFileStore(t *testing.T) {
 	defer fs.Close()
 
 	testPutGet := func(t *testing.T, f testFile) {
-		hash, err := fs.Put(bytes.NewReader(f.b), &f.fi)
+		hash, err := fs.Put(bytes.NewReader(f.b), f.name, f.from)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -83,8 +85,8 @@ func TestFileStore(t *testing.T) {
 		if !bytes.Equal(b, f.b) {
 			t.Errorf("bytes = %#v, want %#v", b, f.b)
 		}
-		if name != f.fi.Name {
-			t.Errorf("name = %q, want %q", name, f.fi.Name)
+		if name != f.name {
+			t.Errorf("name = %q, want %q", name, f.name)
 		}
 	}
 
@@ -95,7 +97,7 @@ func TestFileStore(t *testing.T) {
 	t.Run("parallel put/get", func(t *testing.T) {
 		for ; n > 0; n-- {
 			for _, f := range testFiles {
-				t.Run(f.name, func(t *testing.T) {
+				t.Run(f.desc, func(t *testing.T) {
 					t.Parallel()
 					testPutGet(t, f)
 				})
@@ -103,10 +105,10 @@ func TestFileStore(t *testing.T) {
 		}
 	})
 
-	fiModified := &fileInfo{"modified name", "modified ip address"}
+	fModified := &testFile{name: "modified name", from: "modified ip address"}
 
 	testModifiedInfo := func(t *testing.T, f testFile) {
-		hash, err := fs.Put(bytes.NewReader(f.b), fiModified)
+		hash, err := fs.Put(bytes.NewReader(f.b), fModified.name, fModified.from)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -124,14 +126,14 @@ func TestFileStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer r.Close()
-		if name != f.fi.Name {
-			t.Errorf("name = %q, want %q", name, f.fi.Name)
+		if name != f.name {
+			t.Errorf("name = %q, want %q", name, f.name)
 		}
 	}
 
 	t.Run("modified info", func(t *testing.T) {
 		for _, f := range testFiles {
-			t.Run(f.name, func(t *testing.T) {
+			t.Run(f.desc, func(t *testing.T) {
 				t.Parallel()
 				testModifiedInfo(t, f)
 			})
@@ -140,7 +142,7 @@ func TestFileStore(t *testing.T) {
 
 	t.Run("reader error", func(t *testing.T) {
 		r := iotest.TimeoutReader(bytes.NewReader([]byte("readererror")))
-		_, err := fs.Put(r, &fileInfo{"name", "ip address"})
+		_, err := fs.Put(r, "name", "ip address")
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -189,8 +191,7 @@ func BenchmarkStore(b *testing.B) {
 
 	for i := 0; i < 10; i++ {
 		data := fmt.Sprintf("%010x", i)
-		fi := fileInfo{data, data}
-		_, err := fs.Put(strings.NewReader(data), &fi)
+		_, err := fs.Put(strings.NewReader(data), data, data)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -218,22 +219,28 @@ func BenchmarkStore(b *testing.B) {
 	})
 
 	b.Run("put", func(b *testing.B) {
+		b.StopTimer()
 		storeDir := filepath.Join("testdata", "benchstore2")
 		fs, err := openFileStore(storeDir, testHasher)
 		if err != nil {
 			b.Fatal(err)
 		}
-		defer os.RemoveAll(storeDir)
-		defer fs.Close()
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			data := fmt.Sprintf("%010x", i)
-			fi := fileInfo{data, data}
-			_, err := fs.Put(strings.NewReader(data), &fi)
-			if err != nil {
-				b.Fatal(err)
+		b.StartTimer()
+		n := int64(0)
+		b.RunParallel(func(pb *testing.PB) {
+			for pb.Next() {
+				i := atomic.AddInt64(&n, 1)
+				data := fmt.Sprintf("%010x", i)
+				_, err = fs.Put(strings.NewReader(data), data, data)
+				if err != nil {
+					b.Fatal(err)
+				}
 			}
-		}
+		})
+		b.StopTimer()
+		fs.Close()
+		os.RemoveAll(storeDir)
+		b.StartTimer()
 	})
 }
 
@@ -285,7 +292,7 @@ func multipartBody(key string, f testFile) ([]byte, string, error) {
 	b := bytes.NewBuffer(nil)
 	w := multipart.NewWriter(b)
 	w.WriteField("k", key)
-	name := f.fi.Name
+	name := f.name
 	if name == "" {
 		// go's multipart file parser doesn't like empty file names
 		name = "filename"

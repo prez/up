@@ -47,8 +47,6 @@ var (
 	errSizeLimit    = errors.New("size limit exceeded")
 )
 
-type fileInfo struct{ Name, From string }
-
 var filesBucket = []byte("files")
 
 type fileStore struct {
@@ -98,18 +96,15 @@ func readToTemp(dir string, r io.Reader) (string, error) {
 	return tn, err
 }
 
-var b64 = base64.RawURLEncoding.EncodeToString
-
-func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
+func (fs *fileStore) Put(r io.Reader, name, from string) (string, error) {
 	hw := fs.hash()
 	r = io.TeeReader(r, hw)
-	// write to temp file
 	tempName, err := readToTemp(fs.path, r)
 	if err != nil {
 		return "", err
 	}
 	defer os.Remove(tempName)
-	hash := b64(hw.Sum(nil))
+	hash := base64.RawURLEncoding.EncodeToString(hw.Sum(nil))
 	fs.putLock.Lock()
 	defer fs.putLock.Unlock()
 	// check if file already exists
@@ -118,7 +113,7 @@ func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
 	}
 	// log uploader ip
 	_, err = fmt.Fprintf(fs.log, "%s %q (%s) from %s\n",
-		time.Now().Format(time.RFC3339), fi.Name, hash, fi.From)
+		time.Now().Format(time.RFC3339), name, hash, from)
 	if err != nil {
 		return hash, err
 	}
@@ -133,7 +128,7 @@ func (fs *fileStore) Put(r io.Reader, fi *fileInfo) (string, error) {
 	}
 	// add to db
 	return hash, fs.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(filesBucket).Put([]byte(hash), []byte(fi.Name))
+		return tx.Bucket(filesBucket).Put([]byte(hash), []byte(name))
 	})
 }
 
@@ -198,7 +193,7 @@ func checkKey(k string, keys []string) bool {
 		return false
 	}
 	for _, b := range keys {
-		if len(k) == len(b) && subtle.ConstantTimeCompare([]byte(k), []byte(b)) == 1 {
+		if subtle.ConstantTimeCompare([]byte(k), []byte(b)) == 1 {
 			return true
 		}
 	}
@@ -285,17 +280,18 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	defer f.Close()
-	typ, rd, err := detectContentType(f, fh.Filename, fh.Header.Get("Content-Type"))
+	typ := fh.Header.Get("Content-Type")
+	typ, rd, err := detectContentType(f, fh.Filename, typ)
 	if err != nil {
 		return err
 	}
-	fi := fileInfo{Name: fixMultipartPath(fh.Filename), From: remoteAddr(r)}
-	name, err := s.Put(rd, &fi)
+	addr := remoteAddr(r)
+	name, err := s.Put(rd, fixMultipartPath(fh.Filename), addr)
 	if err != nil {
 		return err
 	}
 	s.logger.Printf("received file %q (%s) (%s) from %s",
-		fh.Filename, typ, name, remoteAddr(r))
+		fh.Filename, typ, name, addr)
 	_, err = fmt.Fprintf(w, "%s/%s%s\n",
 		s.config.ExternalURL, name, extensionByType(typ))
 	return err
