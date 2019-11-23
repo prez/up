@@ -47,8 +47,17 @@ var (
 	errSizeLimit    = errors.New("size limit exceeded")
 )
 
-var filesBucket = []byte("files")
-
+// fileStore implements a file system backed hashed file store. The directory
+// structure looks like this:
+//
+//    db      - key/value database
+//    log     - uploader log
+//    public/ - public file directory
+//
+// The database maps hashes to their original file names. The log stores all
+// file uploads, their timestamp, and their uploader's IP address. The public
+// file directory contains uploaded files named after their hash. The file
+// store root is also used for temporary files.
 type fileStore struct {
 	path    string
 	hash    func() hash.Hash
@@ -57,6 +66,10 @@ type fileStore struct {
 	putLock sync.Mutex
 }
 
+var filesBucket = []byte("files")
+
+// openFileStore creates and opens a file store using the given hash function
+// at the given path.
 func openFileStore(p string, hash func() hash.Hash) (*fileStore, error) {
 	if err := os.MkdirAll(filepath.Join(p, "public"), 0700); err != nil {
 		return nil, err
@@ -82,6 +95,8 @@ func (fs *fileStore) Close() error {
 	return fs.db.Close()
 }
 
+// readToTemp reads all data from r into a temporary file in dir and returns
+// the file name.
 func readToTemp(dir string, r io.Reader) (string, error) {
 	tf, err := ioutil.TempFile(dir, "tmp-")
 	if err != nil {
@@ -96,7 +111,9 @@ func readToTemp(dir string, r io.Reader) (string, error) {
 	return tn, err
 }
 
+// Put adds a file to the file store, storing the name and originator.
 func (fs *fileStore) Put(r io.Reader, name, from string) (string, error) {
+	// stream content to temporary file while hashing it
 	hw := fs.hash()
 	r = io.TeeReader(r, hw)
 	tempName, err := readToTemp(fs.path, r)
@@ -105,6 +122,7 @@ func (fs *fileStore) Put(r io.Reader, name, from string) (string, error) {
 	}
 	defer os.Remove(tempName)
 	hash := base64.RawURLEncoding.EncodeToString(hw.Sum(nil))
+	// take uploading lock
 	fs.putLock.Lock()
 	defer fs.putLock.Unlock()
 	// check if file already exists
@@ -132,6 +150,8 @@ func (fs *fileStore) Put(r io.Reader, name, from string) (string, error) {
 	})
 }
 
+// Get checks if a given hash exists in the file store and retrieves it's
+// original file name.
 func (fs *fileStore) Get(hash string) (string, error) {
 	b := []byte(nil)
 	err := fs.db.View(func(tx *bolt.Tx) error {
@@ -147,16 +167,17 @@ func (fs *fileStore) Get(hash string) (string, error) {
 	return string(b), err
 }
 
+// Open opens a file in the file store, given its hash.
 func (fs *fileStore) Open(hash string) (http.File, error) {
 	return http.Dir(filepath.Join(fs.path, "public")).Open(hash)
 }
 
 type config struct {
-	ExternalURL string   `json:"external_url"` // External URL (for links)
-	MaxSize     int64    `json:"max_size"`     // Maximum file size
+	ExternalURL string   `json:"external_url"` // External URL (for user facing links)
+	MaxSize     int64    `json:"max_size"`     // Maximum upload file size
 	Seed        []byte   `json:"seed"`         // File hash seed
-	Keys        []string `json:"keys"`         // Uploader keys
-	XAccelPath  string   `json:"x_accel_path"` // Enable X-Accel-Redirect
+	Keys        []string `json:"keys"`         // Authorized uploader keys
+	XAccelPath  string   `json:"x_accel_path"` // X-Accel-Redirect support
 }
 
 func parseConfig(p string) (*config, error) {
@@ -168,6 +189,7 @@ func parseConfig(p string) (*config, error) {
 	return c, json.Unmarshal(b, c)
 }
 
+// fileHost exposes a fileStore over http.
 type fileHost struct {
 	*fileStore
 	config *config
@@ -266,6 +288,10 @@ func remoteAddr(req *http.Request) string {
 	return h
 }
 
+// uploadFile handles file upload requests, checking the provided key against
+// authorized ones and handling content type detection. The content type is
+// used to find a file extension to append to the returned URL, which is used
+// by serveFile later.
 func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
 	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxSize)
 	k := r.FormValue("k")
@@ -309,6 +335,9 @@ func cleanPath(p string) (string, string) {
 // escape file name for content-disposition header
 var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 
+// serveFile handles file download requests. It uses the file extension from
+// the URL to pick a content type to serve the file with, and sends the file's
+// original file name (if any) in the Content-Disposition header.
 func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	hash, ext := cleanPath(r.URL.Path)
 	if hash == "" {
@@ -324,13 +353,19 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	}
 	w.Header().Set("Content-Type", typ)
 	if name != "" {
+		// send original file name and try to make browsers display content
+		// inline
 		w.Header().Set("Content-Disposition",
 			fmt.Sprintf(`inline; filename="%s"`, quoteEscaper.Replace(name)))
 	}
 	if s.config.XAccelPath != "" {
+		// X-Accel-Redirect to configured path. See
+		// https://www.nginx.com/resources/wiki/start/topics/examples/x-accel/
+		// for details.
 		w.Header().Set("X-Accel-Redirect", path.Join(s.config.XAccelPath, hash))
 		return nil
 	}
+	// XXX: should this use modtime, or neither?
 	w.Header().Set("ETag", hash)
 	f, err := s.Open(hash)
 	if err != nil {
@@ -386,10 +421,14 @@ func main() {
 	}
 	defer fh.Close()
 	s := &http.Server{
-		Addr:        *addr,
+		Addr: *addr,
+		// XXX: should set more timeouts
+		// ReadTimeout/ReadHeaderTimeout
+		// WriteTimeout
 		IdleTimeout: 60 * time.Second,
 		Handler:     fh,
 	}
+	// graceful shutdown support
 	die, sig := make(chan struct{}), make(chan os.Signal, 1)
 	go func() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
