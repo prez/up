@@ -29,6 +29,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+// extOverride contains content type to file extension mappings. Takes priority
+// over mime.ExtensionsByType.
 var extOverride = map[string]string{
 	"image/gif":                ".gif",
 	"image/jpeg":               ".jpeg",
@@ -209,6 +211,7 @@ func openFileHost(p string, c *config, l *log.Logger) (*fileHost, error) {
 }
 
 // attempt to check uploader key safely
+// we probably leak key sizes here but that's OK
 func checkKey(k string, keys []string) bool {
 	// make sure keys are a sane length
 	if len(k) < 20 || len(k) > 100 {
