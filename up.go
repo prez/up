@@ -47,17 +47,17 @@ var (
 	errSizeLimit    = errors.New("size limit exceeded")
 )
 
-// fileStore implements a file system backed hashed file store. The directory
-// structure looks like this:
+// fileStore implements a file system backed hashed file store. It uses the
+// following director structure:
 //
 //    db      - key/value database
 //    log     - uploader log
 //    public/ - public file directory
 //
-// The database maps hashes to their original file names. The log stores all
-// file uploads, their timestamp, and their uploader's IP address. The public
-// file directory contains uploaded files named after their hash. The file
-// store root is also used for temporary files.
+// The database maps hashes to their original file names. The log contains all
+// file uploads, their timestamps and the uploaders' IP addresses. The public
+// file directory contains uploaded files named after their hashes.
+// The file store root is also used for temporary files.
 type fileStore struct {
 	path    string
 	hash    func() hash.Hash
@@ -189,7 +189,7 @@ func parseConfig(p string) (*config, error) {
 	return c, json.Unmarshal(b, c)
 }
 
-// fileHost exposes a fileStore over http.
+// fileHost exposes a fileStore over HTTP, with password based authentication.
 type fileHost struct {
 	*fileStore
 	config *config
@@ -233,7 +233,7 @@ func fixMultipartPath(s string) string {
 	return s
 }
 
-// split file name on extension
+// split file name into name and extension
 func splitExt(p string) (string, string) {
 	if i := strings.IndexByte(p, '.'); i != -1 {
 		return p[:i], p[i:]
@@ -323,15 +323,6 @@ func (s *fileHost) uploadFile(w http.ResponseWriter, r *http.Request) error {
 	return err
 }
 
-// validates and splits a path like <hash>.ext
-func cleanPath(p string) (string, string) {
-	p = strings.TrimLeft(path.Clean(p), "/")
-	if strings.ContainsAny(p, "/\\") {
-		return "", ""
-	}
-	return splitExt(p)
-}
-
 // escape file name for content-disposition header
 var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 
@@ -339,7 +330,13 @@ var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 // the URL to pick a content type to serve the file with, and sends the file's
 // original file name (if any) in the Content-Disposition header.
 func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
-	hash, ext := cleanPath(r.URL.Path)
+	// clean up and validate path
+	p := strings.TrimLeft(path.Clean(r.URL.Path), "/")
+	// XXX: strictly not necessary because files are opened through http.Dir
+	if strings.ContainsAny(p, "/\\") {
+		return errNotExist
+	}
+	hash, ext := splitExt(p)
 	if hash == "" {
 		return errNotExist
 	}
@@ -347,8 +344,10 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	// use file extension from URL to pick a content type
 	typ := mime.TypeByExtension(ext)
 	if typ == "" {
+		// XXX: fall back to extension from original file name?
 		typ = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", typ)
