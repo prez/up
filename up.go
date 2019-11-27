@@ -368,7 +368,7 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	// XXX: should this use modtime, or neither?
-	w.Header().Set("ETag", hash)
+	//w.Header().Set("ETag", hash)
 	f, err := s.Open(hash)
 	if err != nil {
 		return err
