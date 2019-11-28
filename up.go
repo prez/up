@@ -282,7 +282,7 @@ func extensionByType(typ string) string {
 	return ""
 }
 
-// XXX: doesn't support X-Forwarded-For
+// TODO?: doesn't support X-Forwarded-For
 func remoteAddr(req *http.Request) string {
 	h := req.Header.Get("X-Real-IP")
 	if h == "" {
@@ -335,7 +335,7 @@ var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
 func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	// clean up and validate path
 	p := strings.TrimLeft(path.Clean(r.URL.Path), "/")
-	// XXX: strictly not necessary because files are opened through http.Dir
+	// NOTE: strictly not necessary because files are opened through http.Dir
 	if strings.ContainsAny(p, "/\\") {
 		return errNotExist
 	}
@@ -350,7 +350,7 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 	// use file extension from URL to pick a content type
 	typ := mime.TypeByExtension(ext)
 	if typ == "" {
-		// XXX: fall back to extension from original file name?
+		// TODO: fall back to extension from original file name?
 		typ = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", typ)
@@ -368,7 +368,7 @@ func (s *fileHost) serveFile(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 	// XXX: should this use modtime, or neither?
-	//w.Header().Set("ETag", hash)
+	w.Header().Set("ETag", hash)
 	f, err := s.Open(hash)
 	if err != nil {
 		return err
@@ -427,6 +427,7 @@ func main() {
 		// XXX: should set more timeouts
 		// ReadTimeout/ReadHeaderTimeout
 		// WriteTimeout
+		// and/or make custom contexts in serveFile/uploadFile
 		IdleTimeout: 60 * time.Second,
 		ErrorLog:    l,
 		Handler:     fh,
