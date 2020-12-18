@@ -36,10 +36,18 @@ var extOverride = map[string]string{
 	"image/jpeg":               ".jpeg",
 	"image/png":                ".png",
 	"image/svg+xml":            ".svg",
+	"image/webp":               ".webp",
 	"text/html":                ".html",
+	"application/pdf":          ".pdf",
 	"text/plain":               ".txt",
 	"video/webm":               ".webm",
 	"video/x-matroska":         ".mkv",
+	"audio/aac":                ".aac",
+	"audio/mpeg":               ".mp3",
+	"audio/ogg":                ".ogg",
+	"audio/opus":               ".opus",
+	"audio/wav":                ".wav",
+	"audio/flac":               ".flac",
 	"application/octet-stream": "",
 }
 

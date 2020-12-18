@@ -1,4 +1,4 @@
-module github.com/lucy/up
+module github.com/prez/up
 
 go 1.14
 
