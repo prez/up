@@ -48,7 +48,6 @@ var extOverride = map[string]string{
 	"audio/opus":               ".opus",
 	"audio/wav":                ".wav",
 	"audio/flac":               ".flac",
-	"application/octet-stream": "",
 }
 
 var (
